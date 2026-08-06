@@ -1,36 +1,872 @@
-openapi: 3.1.0
+openapi: "3.1.0"
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
-  version: 0.1.0
-  description: API specification
+  version: "1.0.0"
 servers:
   - url: /api
-    description: Base API path
-tags:
-  - name: health
-    description: Health operations
+
 paths:
   /healthz:
     get:
-      operationId: healthCheck
-      tags: [health]
+      operationId: getHealth
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
-          description: Healthy
+          description: OK
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  # ─── AUTH ────────────────────────────────────────────────────────────────────
+  /auth/register:
+    post:
+      operationId: registerUser
+      summary: Register a new user (passenger or driver)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRegisterInput"
+      responses:
+        "201":
+          description: User registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResult"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/login:
+    post:
+      operationId: loginUser
+      summary: Login with phone and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserLoginInput"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResult"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/me:
+    get:
+      operationId: getMe
+      summary: Get current user profile
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ─── TRIPS ───────────────────────────────────────────────────────────────────
+  /trips:
+    get:
+      operationId: listTrips
+      summary: List trips for current user
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+        - in: query
+          name: offset
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of trips
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Trip"
+    post:
+      operationId: createTrip
+      summary: Request a new trip (passenger)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TripInput"
+      responses:
+        "201":
+          description: Trip created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trip"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /trips/{id}:
+    get:
+      operationId: getTrip
+      summary: Get a specific trip
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Trip details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trip"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /trips/{id}/status:
+    patch:
+      operationId: updateTripStatus
+      summary: Update trip status (accept, arrive, start, complete, cancel)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TripStatusUpdate"
+      responses:
+        "200":
+          description: Trip updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trip"
+        "400":
+          description: Invalid status transition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /trips/{id}/messages:
+    get:
+      operationId: listTripMessages
+      summary: Get chat messages for a trip
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+    post:
+      operationId: createMessage
+      summary: Send a chat message in a trip
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageInput"
+      responses:
+        "201":
+          description: Message sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+
+  /trips/{id}/rating:
+    post:
+      operationId: rateTrip
+      summary: Rate a completed trip
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RatingInput"
+      responses:
+        "201":
+          description: Rating submitted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rating"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /trips/nearby:
+    get:
+      operationId: getNearbyTrips
+      summary: Get nearby pending trip requests (driver)
+      parameters:
+        - in: query
+          name: lat
+          required: true
+          schema:
+            type: number
+        - in: query
+          name: lng
+          required: true
+          schema:
+            type: number
+        - in: query
+          name: radius
+          schema:
+            type: number
+      responses:
+        "200":
+          description: Nearby trips
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Trip"
+
+  # ─── DRIVERS ─────────────────────────────────────────────────────────────────
+  /drivers/status:
+    patch:
+      operationId: updateDriverStatus
+      summary: Toggle driver online/offline status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DriverStatusUpdate"
+      responses:
+        "200":
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /drivers/location:
+    patch:
+      operationId: updateDriverLocation
+      summary: Update driver GPS location
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocationUpdate"
+      responses:
+        "200":
+          description: Location updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /drivers/panic:
+    post:
+      operationId: triggerPanic
+      summary: Trigger panic button — broadcasts alert to admins and nearby drivers
+      responses:
+        "200":
+          description: Panic alert broadcast
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PanicAlert"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /drivers/nearby:
+    get:
+      operationId: getNearbyDrivers
+      summary: Get nearby online drivers (passenger)
+      parameters:
+        - in: query
+          name: lat
+          required: true
+          schema:
+            type: number
+        - in: query
+          name: lng
+          required: true
+          schema:
+            type: number
+        - in: query
+          name: vehicleType
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Nearby drivers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DriverLocation"
+
+  # ─── VEHICLES ────────────────────────────────────────────────────────────────
+  /vehicles:
+    get:
+      operationId: listVehicles
+      summary: List vehicles for current driver
+      responses:
+        "200":
+          description: List of vehicles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Vehicle"
+    post:
+      operationId: createVehicle
+      summary: Register a vehicle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VehicleInput"
+      responses:
+        "201":
+          description: Vehicle created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Vehicle"
+
+  # ─── ADMIN ────────────────────────────────────────────────────────────────────
+  /admin/stats:
+    get:
+      operationId: getAdminStats
+      summary: Get platform statistics
+      responses:
+        "200":
+          description: Platform stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminStats"
+
+  /admin/users:
+    get:
+      operationId: listAdminUsers
+      summary: List all users
+      parameters:
+        - in: query
+          name: role
+          schema:
+            type: string
+        - in: query
+          name: isActive
+          schema:
+            type: boolean
+        - in: query
+          name: limit
+          schema:
+            type: integer
+        - in: query
+          name: offset
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+
+  /admin/users/{id}/status:
+    patch:
+      operationId: updateUserStatus
+      summary: Approve or block a user
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserStatusUpdate"
+      responses:
+        "200":
+          description: User status updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/trips:
+    get:
+      operationId: listAdminTrips
+      summary: List all trips (admin)
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+        - in: query
+          name: offset
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of trips
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Trip"
+
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
       properties:
         status:
           type: string
-      required:
-        - status
 
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    # ─── AUTH ─────────────────────────────────────────────────────────────────
+    UserRegisterInput:
+      type: object
+      required: [name, phone, password, role]
+      properties:
+        name:
+          type: string
+        phone:
+          type: string
+        email:
+          type: ["string", "null"]
+        password:
+          type: string
+        role:
+          type: string
+          enum: [passenger, driver]
+
+    UserLoginInput:
+      type: object
+      required: [phone, password]
+      properties:
+        phone:
+          type: string
+        password:
+          type: string
+
+    AuthResult:
+      type: object
+      required: [token, user]
+      properties:
+        token:
+          type: string
+        user:
+          $ref: "#/components/schemas/User"
+
+    # ─── USER ─────────────────────────────────────────────────────────────────
+    User:
+      type: object
+      required: [id, name, phone, role, isActive, isOnline, rating, ratingCount, createdAt]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        phone:
+          type: string
+        email:
+          type: ["string", "null"]
+        role:
+          type: string
+          enum: [passenger, driver, admin]
+        isActive:
+          type: boolean
+        isOnline:
+          type: boolean
+        currentLat:
+          type: ["number", "null"]
+        currentLng:
+          type: ["number", "null"]
+        rating:
+          type: number
+        ratingCount:
+          type: integer
+        createdAt:
+          type: string
+
+    UserStatusUpdate:
+      type: object
+      required: [isActive]
+      properties:
+        isActive:
+          type: boolean
+
+    # ─── DRIVER ───────────────────────────────────────────────────────────────
+    DriverStatusUpdate:
+      type: object
+      required: [isOnline]
+      properties:
+        isOnline:
+          type: boolean
+
+    LocationUpdate:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat:
+          type: number
+        lng:
+          type: number
+
+    DriverLocation:
+      type: object
+      required: [id, name, lat, lng, rating, vehicleType]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        lat:
+          type: number
+        lng:
+          type: number
+        rating:
+          type: number
+        vehicleType:
+          type: ["string", "null"]
+
+    # ─── VEHICLE ──────────────────────────────────────────────────────────────
+    Vehicle:
+      type: object
+      required: [id, driverId, plate, model, brand, color, vehicleType, createdAt]
+      properties:
+        id:
+          type: integer
+        driverId:
+          type: integer
+        plate:
+          type: string
+        model:
+          type: string
+        brand:
+          type: string
+        color:
+          type: string
+        vehicleType:
+          type: string
+          enum: [economico, ejecutivo, taxi, moto]
+        createdAt:
+          type: string
+
+    VehicleInput:
+      type: object
+      required: [plate, model, brand, color, vehicleType]
+      properties:
+        plate:
+          type: string
+        model:
+          type: string
+        brand:
+          type: string
+        color:
+          type: string
+        vehicleType:
+          type: string
+          enum: [economico, ejecutivo, taxi, moto]
+
+    # ─── TRIP ─────────────────────────────────────────────────────────────────
+    Trip:
+      type: object
+      required: [id, passengerId, status, originLat, originLng, originAddress, destinationLat, destinationLng, destinationAddress, vehicleType, estimatedPrice, paymentMethod, createdAt]
+      properties:
+        id:
+          type: integer
+        passengerId:
+          type: integer
+        driverId:
+          type: ["integer", "null"]
+        status:
+          type: string
+          enum: [pending, accepted, driver_arriving, in_progress, completed, cancelled]
+        originLat:
+          type: number
+        originLng:
+          type: number
+        originAddress:
+          type: string
+        destinationLat:
+          type: number
+        destinationLng:
+          type: number
+        destinationAddress:
+          type: string
+        vehicleType:
+          type: string
+        estimatedPrice:
+          type: number
+        finalPrice:
+          type: ["number", "null"]
+        distanceKm:
+          type: ["number", "null"]
+        paymentMethod:
+          type: string
+          enum: [cash, card]
+        cancelReason:
+          type: ["string", "null"]
+        startedAt:
+          type: ["string", "null"]
+        completedAt:
+          type: ["string", "null"]
+        cancelledAt:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+        passenger:
+          $ref: "#/components/schemas/User"
+        driver:
+          type: ["object", "null"]
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            phone:
+              type: string
+            rating:
+              type: number
+            currentLat:
+              type: ["number", "null"]
+            currentLng:
+              type: ["number", "null"]
+
+    TripInput:
+      type: object
+      required: [originLat, originLng, originAddress, destinationLat, destinationLng, destinationAddress, vehicleType, paymentMethod]
+      properties:
+        originLat:
+          type: number
+        originLng:
+          type: number
+        originAddress:
+          type: string
+        destinationLat:
+          type: number
+        destinationLng:
+          type: number
+        destinationAddress:
+          type: string
+        vehicleType:
+          type: string
+          enum: [economico, ejecutivo, taxi, moto]
+        paymentMethod:
+          type: string
+          enum: [cash, card]
+        estimatedPrice:
+          type: number
+
+    TripStatusUpdate:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [accepted, driver_arriving, in_progress, completed, cancelled]
+        cancelReason:
+          type: ["string", "null"]
+        finalPrice:
+          type: ["number", "null"]
+
+    # ─── MESSAGE ──────────────────────────────────────────────────────────────
+    Message:
+      type: object
+      required: [id, tripId, senderId, content, createdAt]
+      properties:
+        id:
+          type: integer
+        tripId:
+          type: integer
+        senderId:
+          type: integer
+        content:
+          type: string
+        senderName:
+          type: string
+        createdAt:
+          type: string
+
+    MessageInput:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+
+    # ─── RATING ───────────────────────────────────────────────────────────────
+    Rating:
+      type: object
+      required: [id, tripId, raterId, rateeId, score, createdAt]
+      properties:
+        id:
+          type: integer
+        tripId:
+          type: integer
+        raterId:
+          type: integer
+        rateeId:
+          type: integer
+        score:
+          type: integer
+        comment:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    RatingInput:
+      type: object
+      required: [score]
+      properties:
+        score:
+          type: integer
+        comment:
+          type: ["string", "null"]
+
+    # ─── ADMIN ────────────────────────────────────────────────────────────────
+    PanicAlert:
+      type: object
+      required: [driverId, driverName, timestamp, message, notifiedDrivers]
+      properties:
+        driverId:
+          type: integer
+        driverName:
+          type: string
+        lat:
+          type: ["number", "null"]
+        lng:
+          type: ["number", "null"]
+        timestamp:
+          type: string
+        message:
+          type: string
+        notifiedDrivers:
+          type: integer
+
+    AdminStats:
+      type: object
+      required: [totalUsers, totalDrivers, totalPassengers, activeTrips, completedTrips, totalRevenue, onlineDrivers]
+      properties:
+        totalUsers:
+          type: integer
+        totalDrivers:
+          type: integer
+        totalPassengers:
+          type: integer
+        activeTrips:
+          type: integer
+        completedTrips:
+          type: integer
+        totalRevenue:
+          type: number
+        onlineDrivers:
+          type: integer
+        pendingTrips:
+          type: integer

@@ -1,0 +1,24 @@
+kind = "mobile"
+previewPath = "/"
+title = "MóvilApp"
+description = "A ride-sharing mobile app for passengers and drivers. Passengers can request taxi trips with real-time driver matching, track their ride on a map, chat with their driver, and view trip history. Drivers can go online, accept nearby trip requests, and navigate to passengers."
+version = "1.0.0"
+id = "artifacts/movilapp"
+router = "expo-domain"
+
+[[services]]
+name = "expo"
+ensurePreviewReachable = "/status"
+paths = [ "/" ]
+localPort = 21280
+
+[services.development]
+run = "pnpm --filter @workspace/movilapp run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/movilapp", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/movilapp", "run", "serve" ]
+
+[services.env]
+PORT = "21280"
+BASE_PATH = "/"

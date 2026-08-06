@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "MóvilApp",
+    "slug": "movilapp",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "movilapp",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/images/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#08080F"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "MóvilApp usa tu ubicación para mostrar conductores cercanos y rastrear tu viaje en tiempo real.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "MóvilApp usa tu ubicación en segundo plano para actualizar tu posición mientras conduces."
+      }
+    },
+    "android": {
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": [
+      [
+        "expo-router",
+        {
+          "origin": "https://replit.com/"
+        }
+      ],
+      "expo-font",
+      "expo-web-browser",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "MóvilApp usa tu ubicación para mostrarte conductores cercanos y rastrear tu viaje.",
+          "locationWhenInUsePermission": "MóvilApp usa tu ubicación para mostrarte conductores cercanos y rastrear tu viaje."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}
