@@ -44,8 +44,8 @@ router.patch("/status", authenticate, requireRole("driver"), async (req, res) =>
 
   const [user] = await db
     .update(usersTable)
-    .set({ isOnline })
-    .where(eq(usersTable.id, driverId))
+    .set({ acceptedPayments: sanitized })
+    .where(eq(usersTable.id, req.user!.userId))
     .returning();
 
   // If forcibly going offline (e.g. subscription expired mid-session), clear pending requests
@@ -61,8 +61,8 @@ router.patch("/location", authenticate, requireRole("driver"), async (req, res) 
 
   const [user] = await db
     .update(usersTable)
-    .set({ currentLat: String(lat), currentLng: String(lng) })
-    .where(eq(usersTable.id, driverId))
+    .set({ acceptedPayments: sanitized })
+    .where(eq(usersTable.id, req.user!.userId))
     .returning();
 
   const locationPayload = {

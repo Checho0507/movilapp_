@@ -186,12 +186,17 @@ router.get("/", authenticate, async (req, res) => {
   const trips = await db
     .select()
     .from(tripsTable)
-    .where(and(...conditions))
+    .where(
+      and(
+        eq(tripsTable.status, "pending"),
+        sql`${tripsTable.originLat}::numeric BETWEEN ${latN - deltaLat} AND ${latN + deltaLat}`,
+        sql`${tripsTable.originLng}::numeric BETWEEN ${lngN - deltaLng} AND ${lngN + deltaLng}`
+      )
+    )
     .orderBy(desc(tripsTable.createdAt))
-    .limit(Number(limit))
-    .offset(Number(offset));
+    .limit(20);
 
-  const enriched = await Promise.all(trips.map(enrichTrip));
+  const enriched = await enrichTrip(updated);
   res.json(enriched);
 });
 
@@ -213,21 +218,9 @@ router.post("/", authenticate, async (req, res) => {
     vehicleType: string; paymentMethod: string; estimatedPrice?: number;
   };
 
-  const [trip] = await db.insert(tripsTable).values({
-    passengerId: user.userId,
-    originLat: String(originLat),
-    originLng: String(originLng),
-    originAddress,
-    destinationLat: String(destinationLat),
-    destinationLng: String(destinationLng),
-    destinationAddress,
-    vehicleType,
-    paymentMethod,
-    estimatedPrice: String(estimatedPrice ?? 0),
-    status: "pending",
-  }).returning();
+  const [trip] = await db.select().from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
 
-  const enriched = await enrichTrip(trip);
+  const enriched = await enrichTrip(updated);
 
   // Notify only eligible online drivers within 1 km, filtered by payment method
   const eligibleIds = await getEligibleDriverIds(paymentMethod ?? "cash", originLat, originLng);
@@ -270,23 +263,37 @@ router.get("/nearby", authenticate, async (req, res) => {
     .orderBy(desc(tripsTable.createdAt))
     .limit(20);
 
-  const enriched = await Promise.all(trips.map(enrichTrip));
+  const enriched = await enrichTrip(updated);
+
+  // Notify passenger and driver about status change
+  // Emit both the generic event (for home screen) and the status-specific event (for trip detail screen)
+  io?.to(`trip:${tripId}`).emit("trip_status_updated", enriched);
+  io?.to(`trip:${tripId}`).emit(`trip:${status}`, enriched);
+  io?.to(`user:${trip.passengerId}`).emit("trip_status_updated", enriched);
+  if (trip.driverId) io?.to(`user:${trip.driverId}`).emit("trip_status_updated", enriched);
+
   res.json(enriched);
 });
 
-// GET /api/trips/:id
-router.get("/:id", authenticate, async (req, res) => {
+// GET /api/trips/:id/messages
+router.get("/:id/messages", authenticate, async (req, res) => {
   const tripId = Number(req.params["id"]);
   const [trip] = await db.select().from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
   if (!trip) {
     res.status(404).json({ error: "Trip not found" });
     return;
   }
-  res.json(await enrichTrip(trip));
+
+  await db
+    .update(tripsTable)
+    .set({ actualPrice: String(Number(price)) })
+    .where(eq(tripsTable.id, tripId));
+
+  res.json({ ok: true });
 });
 
-// PATCH /api/trips/:id/status
-router.patch("/:id/status", authenticate, async (req, res) => {
+// POST /api/trips/:id/rating
+router.post("/:id/rating", authenticate, async (req, res) => {
   const tripId = Number(req.params["id"]);
   const user = req.user!;
   const { status, cancelReason, finalPrice } = req.body as {
@@ -302,6 +309,8 @@ router.patch("/:id/status", authenticate, async (req, res) => {
   }
 
   const updates: Partial<typeof tripsTable.$inferInsert> = { status };
+
+    const now = new Date();
 
   if (status === "accepted") {
     // Verify the driver has an active subscription before allowing them to accept trips
@@ -496,3 +505,10 @@ router.post("/:id/rating", authenticate, async (req, res) => {
 });
 
 export default router;
+
+    const [sub] = await db
+      .select({ expiresAt: subscriptionsTable.expiresAt })
+      .from(subscriptionsTable)
+      .where(eq(subscriptionsTable.driverId, user.userId))
+      .orderBy(desc(subscriptionsTable.expiresAt))
+      .limit(1);

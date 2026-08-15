@@ -343,6 +343,19 @@ export default function ProfileScreen() {
         </View>
       )}
 
+      {/* Prominent warning when driver has no subscription at all */}
+      {user.role === 'driver' && !subscription && (
+        <View style={styles.noSubBanner}>
+          <View style={styles.noSubIconRow}>
+            <Feather name="alert-triangle" size={22} color={colors.light.destructive} />
+            <Text style={styles.noSubTitle}>Sin suscripción activa</Text>
+          </View>
+          <Text style={styles.noSubBody}>
+            No tienes ninguna suscripción registrada. No puedes conectarte ni aceptar viajes hasta que un administrador active tu plan.
+          </Text>
+        </View>
+      )}
+
       {/* Payment methods — drivers only */}
       {user.role === 'driver' && (
         <PaymentMethodsCard
@@ -472,6 +485,18 @@ const styles = StyleSheet.create({
   securityNoteText: {
     flex: 1, fontSize: 12, color: colors.light.mutedForeground,
     fontFamily: 'Inter_400Regular', lineHeight: 17,
+  },
+  // No subscription banner
+  noSubBanner: {
+    backgroundColor: colors.light.destructive + '12',
+    borderWidth: 1, borderColor: colors.light.destructive + '40',
+    borderRadius: colors.radius, padding: 16, marginBottom: 16, gap: 10,
+  },
+  noSubIconRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  noSubTitle: { fontSize: 15, fontWeight: '700', color: colors.light.destructive, fontFamily: 'Inter_700Bold' },
+  noSubBody: {
+    fontSize: 13, color: colors.light.destructive, fontFamily: 'Inter_400Regular',
+    lineHeight: 19, opacity: 0.85,
   },
   // Info
   infoCard: {
