@@ -143,7 +143,7 @@ export default function LoginScreen() {
             style={styles.input}
             value={phone}
             onChangeText={setPhone}
-            placeholder="+57 300 000 0000"
+            placeholder="300 000 0000"
             placeholderTextColor={colors.light.mutedForeground}
             keyboardType="phone-pad"
             autoComplete="tel"

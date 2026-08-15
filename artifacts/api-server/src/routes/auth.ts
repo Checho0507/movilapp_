@@ -72,19 +72,10 @@ router.post("/register", async (req, res) => {
     })
     .returning();
 
-  // Grant 60-day free trial for drivers
-  if (role === "driver") {
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + SUBSCRIPTION_PLANS.trial.days * 24 * 60 * 60 * 1000);
-    await db.insert(subscriptionsTable).values({
-      driverId: user.id,
-      plan: "trial",
-      priceCop: 0,
-      startsAt: now,
-      expiresAt,
-      isTrial: true,
-    });
-  }
+  // NOTE: Drivers do NOT receive a trial here.
+  // The 60-day trial is granted when they register their first vehicle (POST /api/vehicles).
+  // This ties trial eligibility to the vehicle plate — not the phone number —
+  // preventing drivers from creating new accounts to reset the trial.
 
   const token = signToken({ userId: user.id, role: user.role });
   res.status(201).json({ token, user: formatUser(user) });

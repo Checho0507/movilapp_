@@ -1,3 +1,4 @@
+- [Vehicle trial logic](vehicle-trial-logic.md) — Trial granted at vehicle registration (not account creation), tied to plate to prevent new-account abuse.
 - [DB schema corrections](db-schema-corrections.md) — Several tables were created with wrong columns; correct schemas are documented here.
 - [Socket event name contract](socket-events.md) — Server emits both generic + status-specific events; client listeners rely on specific names.
 - [Drizzle inArray vs raw SQL](drizzle-inarray.md) — Using raw sql`ANY(ARRAY[...])` with parameterized values fails; always use inArray() from drizzle-orm.
