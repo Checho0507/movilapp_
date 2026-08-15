@@ -551,7 +551,10 @@ function DriverHome() {
         Alert.alert(
           '⚠️ Suscripción requerida',
           err?.error ?? 'Tu suscripción ha vencido. Contacta al administrador para renovar tu plan.',
-          [{ text: 'Entendido' }],
+          [
+            { text: 'Entendido', style: 'cancel' },
+            { text: 'Ver suscripción', onPress: () => router.push('/(tabs)/profile') },
+          ],
         );
       } else {
         Alert.alert('Error', err?.error ?? 'Error al cambiar estado');
