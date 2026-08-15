@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "MóvilApp",
+    "name": "MovilApp",
     "slug": "movilapp",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -18,13 +18,15 @@
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "MóvilApp usa tu ubicación para mostrar conductores cercanos y rastrear tu viaje en tiempo real.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "MóvilApp usa tu ubicación en segundo plano para actualizar tu posición mientras conduces."
-      }
+      },
+      "bundleIdentifier": "com.movilapp.app"
     },
     "android": {
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION"
-      ]
+      ],
+      "package": "com.movilapp.app"
     },
     "web": {
       "favicon": "./assets/images/icon.png"
