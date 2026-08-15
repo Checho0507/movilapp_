@@ -233,7 +233,11 @@ export default function ProfileScreen() {
   const { user, logout, updateUser } = useAuth();
   const queryClient = useQueryClient();
 
-  const { data: subscription } = useQuery<SubInfo>({
+  const {
+    data: subscription,
+    isLoading: subLoading,
+    isError: subError,
+  } = useQuery<SubInfo>({
     queryKey: ['my-subscription'],
     queryFn: async () => {
       const token = await AsyncStorage.getItem('auth_token');
@@ -316,8 +320,27 @@ export default function ProfileScreen() {
       </View>
 
       {/* Subscription card — drivers only */}
-      {user.role === 'driver' && subscription && (
+      {user.role === 'driver' && !subLoading && subscription && (
         <SubscriptionCard sub={subscription} />
+      )}
+      {user.role === 'driver' && !subLoading && subError && (
+        <View style={styles.noSubCard}>
+          <View style={styles.noSubHeader}>
+            <Feather name="alert-circle" size={18} color="#FFB800" />
+            <Text style={styles.noSubTitle}>Sin suscripción activa</Text>
+          </View>
+          <Text style={styles.noSubText}>
+            Para operar como conductor debes registrar tu vehículo. Al hacerlo recibirás{' '}
+            <Text style={{ fontWeight: '700', color: colors.light.foreground }}>60 días gratis</Text>{' '}
+            de prueba.
+          </Text>
+          <View style={styles.noSubNote}>
+            <Feather name="info" size={13} color={colors.light.mutedForeground} />
+            <Text style={styles.noSubNoteText}>
+              Cada placa solo puede usar el período de prueba una vez.
+            </Text>
+          </View>
+        </View>
       )}
 
       {/* Payment methods — drivers only */}
@@ -472,4 +495,20 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   logoutText: { fontSize: 15, fontWeight: '600', color: colors.light.destructive, fontFamily: 'Inter_600SemiBold' },
+  // No-subscription card
+  noSubCard: {
+    backgroundColor: colors.light.card, borderRadius: colors.radius,
+    borderWidth: 1, borderColor: '#FFB80040',
+    padding: 16, marginBottom: 16, gap: 10,
+  },
+  noSubHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  noSubTitle: { fontSize: 15, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  noSubText: { fontSize: 13, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', lineHeight: 19 },
+  noSubNote: {
+    flexDirection: 'row', gap: 8, alignItems: 'flex-start',
+    backgroundColor: colors.light.secondary, borderRadius: 8,
+    paddingHorizontal: 10, paddingVertical: 8,
+    borderWidth: 1, borderColor: colors.light.border,
+  },
+  noSubNoteText: { flex: 1, fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', lineHeight: 16 },
 });

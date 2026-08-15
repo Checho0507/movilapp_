@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { usersTable, vehiclesTable, tripsTable, subscriptionsTable } from "@workspace/db";
-import { eq, and, sql, or, inArray } from "drizzle-orm";
+import { eq, and, sql, or, inArray, gt } from "drizzle-orm";
 import { authenticate, requireRole } from "../lib/auth.js";
 import { formatUser } from "./auth.js";
 import type { Server as IOServer } from "socket.io";
@@ -18,13 +18,37 @@ export function setIO(ioInstance: IOServer) {
 // PATCH /api/drivers/status
 router.patch("/status", authenticate, requireRole("driver"), async (req, res) => {
   const { isOnline } = req.body as { isOnline: boolean };
+  const driverId = req.user!.userId;
+
+  // Block going online with an expired or missing subscription
+  if (isOnline) {
+    const [activeSub] = await db
+      .select({ id: subscriptionsTable.id })
+      .from(subscriptionsTable)
+      .where(
+        and(
+          eq(subscriptionsTable.driverId, driverId),
+          gt(subscriptionsTable.expiresAt, new Date()),
+        )
+      )
+      .limit(1);
+
+    if (!activeSub) {
+      res.status(403).json({
+        error: "Tu suscripción ha vencido. Contacta al administrador para renovar tu plan.",
+        code: "SUBSCRIPTION_REQUIRED",
+      });
+      return;
+    }
+  }
+
   const [user] = await db
     .update(usersTable)
     .set({ isOnline })
-    .where(eq(usersTable.id, req.user!.userId))
+    .where(eq(usersTable.id, driverId))
     .returning();
 
-  // Broadcast driver availability to passengers
+  // If forcibly going offline (e.g. subscription expired mid-session), clear pending requests
   io?.emit("driver_status_changed", { driverId: user.id, isOnline });
 
   res.json(formatUser(user));

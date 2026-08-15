@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
-import { tripsTable, messagesTable, ratingsTable, usersTable } from "@workspace/db";
-import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { tripsTable, messagesTable, ratingsTable, usersTable, subscriptionsTable } from "@workspace/db";
+import { eq, and, desc, sql, inArray, gt } from "drizzle-orm";
 import { authenticate } from "../lib/auth.js";
 import { formatUser } from "./auth.js";
 import type { Server as IOServer } from "socket.io";
@@ -304,6 +304,26 @@ router.patch("/:id/status", authenticate, async (req, res) => {
   const updates: Partial<typeof tripsTable.$inferInsert> = { status };
 
   if (status === "accepted") {
+    // Verify the driver has an active subscription before allowing them to accept trips
+    const [activeSub] = await db
+      .select({ id: subscriptionsTable.id })
+      .from(subscriptionsTable)
+      .where(
+        and(
+          eq(subscriptionsTable.driverId, user.userId),
+          gt(subscriptionsTable.expiresAt, new Date()),
+        )
+      )
+      .limit(1);
+
+    if (!activeSub) {
+      res.status(403).json({
+        error: "Tu suscripción ha vencido. No puedes aceptar carreras.",
+        code: "SUBSCRIPTION_REQUIRED",
+      });
+      return;
+    }
+
     updates.driverId = user.userId;
     updates.driverAcceptedAt = new Date();
   } else if (status === "in_progress") {
