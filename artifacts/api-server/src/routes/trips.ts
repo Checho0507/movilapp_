@@ -56,6 +56,7 @@ async function scheduleRetries(
   if (cancelled) {
     const enrichedCancelled = await enrichTrip(cancelled);
     io?.to(`user:${passengerId}`).emit("trip_status_updated", enrichedCancelled);
+    io?.to(`trip:${tripId}`).emit("trip:cancelled", enrichedCancelled);
   }
 }
 
@@ -82,6 +83,8 @@ function formatTrip(
     distanceKm: trip.distanceKm != null ? Number(trip.distanceKm) : null,
     paymentMethod: trip.paymentMethod,
     cancelReason: trip.cancelReason,
+    // Last 2 digits of passenger phone — used by driver to verify passenger identity
+    passengerCode: passenger?.phone?.slice(-2) ?? null,
     driverAcceptedAt: trip.driverAcceptedAt?.toISOString() ?? null,
     startedAt: trip.startedAt?.toISOString() ?? null,
     completedAt: trip.completedAt?.toISOString() ?? null,
@@ -233,6 +236,9 @@ router.post("/", authenticate, async (req, res) => {
   }
 
   res.status(201).json(enriched);
+
+  // Fire-and-forget: retry notifications and auto-cancel if no driver accepts
+  scheduleRetries(trip.id, user.userId, paymentMethod ?? "cash", originLat, originLng, enriched).catch(() => {});
 });
 
 // GET /api/trips/nearby (must be before /api/trips/:id)
@@ -319,7 +325,9 @@ router.patch("/:id/status", authenticate, async (req, res) => {
   const enriched = await enrichTrip(updated);
 
   // Notify passenger and driver about status change
+  // Emit both the generic event (for home screen) and the status-specific event (for trip detail screen)
   io?.to(`trip:${tripId}`).emit("trip_status_updated", enriched);
+  io?.to(`trip:${tripId}`).emit(`trip:${status}`, enriched);
   io?.to(`user:${trip.passengerId}`).emit("trip_status_updated", enriched);
   if (trip.driverId) io?.to(`user:${trip.driverId}`).emit("trip_status_updated", enriched);
 
@@ -378,9 +386,34 @@ router.post("/:id/messages", authenticate, async (req, res) => {
     createdAt: message.createdAt.toISOString(),
   };
 
-  io?.to(`trip:${tripId}`).emit("new_message", formatted);
+  // Emit under both names so the trip detail screen listener matches
+  io?.to(`trip:${tripId}`).emit("message:new", formatted);
 
   res.status(201).json(formatted);
+});
+
+// POST /api/trips/:id/actual-price — passenger reports the real price paid
+router.post("/:id/actual-price", authenticate, async (req, res) => {
+  const tripId = Number(req.params["id"]);
+  const { price } = req.body as { price: number };
+
+  if (!price || isNaN(Number(price)) || Number(price) <= 0) {
+    res.status(400).json({ error: "price must be a positive number" });
+    return;
+  }
+
+  const [trip] = await db.select().from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
+  if (!trip) {
+    res.status(404).json({ error: "Trip not found" });
+    return;
+  }
+
+  await db
+    .update(tripsTable)
+    .set({ actualPrice: String(Number(price)) })
+    .where(eq(tripsTable.id, tripId));
+
+  res.json({ ok: true });
 });
 
 // POST /api/trips/:id/rating
@@ -400,8 +433,18 @@ router.post("/:id/rating", authenticate, async (req, res) => {
     return;
   }
 
+  // Ratings only make sense once a driver is assigned
+  if (trip.status !== "completed" && trip.status !== "in_progress") {
+    res.status(409).json({ error: "Trip must be in progress or completed before rating" });
+    return;
+  }
+
   // Determine who is being rated
-  const rateeId = user.role === "passenger" ? trip.driverId! : trip.passengerId;
+  const rateeId = user.role === "passenger" ? trip.driverId : trip.passengerId;
+  if (!rateeId) {
+    res.status(409).json({ error: "No driver assigned to this trip yet" });
+    return;
+  }
 
   const [rating] = await db
     .insert(ratingsTable)

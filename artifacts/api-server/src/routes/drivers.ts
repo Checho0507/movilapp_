@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
-import { usersTable, vehiclesTable } from "@workspace/db";
-import { eq, and, sql } from "drizzle-orm";
+import { usersTable, vehiclesTable, tripsTable, subscriptionsTable } from "@workspace/db";
+import { eq, and, sql, or, inArray } from "drizzle-orm";
 import { authenticate, requireRole } from "../lib/auth.js";
 import { formatUser } from "./auth.js";
 import type { Server as IOServer } from "socket.io";
@@ -33,18 +33,43 @@ router.patch("/status", authenticate, requireRole("driver"), async (req, res) =>
 // PATCH /api/drivers/location
 router.patch("/location", authenticate, requireRole("driver"), async (req, res) => {
   const { lat, lng } = req.body as { lat: number; lng: number };
+  const driverId = req.user!.userId;
+
   const [user] = await db
     .update(usersTable)
     .set({ currentLat: String(lat), currentLng: String(lng) })
-    .where(eq(usersTable.id, req.user!.userId))
+    .where(eq(usersTable.id, driverId))
     .returning();
 
-  // Broadcast location to any passengers tracking this driver
-  io?.to(`driver:${user.id}`).emit("driver_location_updated", {
+  const locationPayload = {
     driverId: user.id,
     lat: Number(user.currentLat),
     lng: Number(user.currentLng),
-  });
+  };
+
+  // Broadcast to passengers subscribed to this driver's movements
+  io?.to(`driver:${user.id}`).emit("driver_location_updated", locationPayload);
+  io?.to(`driver:${user.id}`).emit("driver:location", locationPayload);
+
+  // Also broadcast to the driver's active trip room so the passenger on the trip detail screen receives it
+  const [activeTrip] = await db
+    .select({ id: tripsTable.id })
+    .from(tripsTable)
+    .where(
+      and(
+        eq(tripsTable.driverId, driverId),
+        or(
+          eq(tripsTable.status, "accepted"),
+          eq(tripsTable.status, "driver_arriving"),
+          eq(tripsTable.status, "in_progress"),
+        ),
+      )
+    )
+    .limit(1);
+
+  if (activeTrip) {
+    io?.to(`trip:${activeTrip.id}`).emit("driver:location", locationPayload);
+  }
 
   res.json(formatUser(user));
 });
@@ -138,11 +163,8 @@ router.get("/nearby", authenticate, async (req, res) => {
         .from(vehiclesTable)
         .where(
           vehicleType
-            ? and(
-                sql`${vehiclesTable.driverId} = ANY(ARRAY[${sql.join(driverIds.map(id => sql`${id}`), sql`, `)}])`,
-                eq(vehiclesTable.vehicleType, vehicleType)
-              )
-            : sql`${vehiclesTable.driverId} = ANY(ARRAY[${sql.join(driverIds.map(id => sql`${id}`), sql`, `)}])`
+            ? and(inArray(vehiclesTable.driverId, driverIds), eq(vehiclesTable.vehicleType, vehicleType))
+            : inArray(vehiclesTable.driverId, driverIds)
         )
     : [];
 
@@ -162,6 +184,47 @@ router.get("/nearby", authenticate, async (req, res) => {
     }));
 
   res.json(result);
+});
+
+// GET /api/drivers/me/subscription — current driver's active subscription
+router.get("/me/subscription", authenticate, requireRole("driver"), async (req, res) => {
+  const driverId = req.user!.userId;
+
+  const [sub] = await db
+    .select()
+    .from(subscriptionsTable)
+    .where(eq(subscriptionsTable.driverId, driverId))
+    .orderBy(subscriptionsTable.expiresAt)
+    .limit(1);
+
+  if (!sub) {
+    res.status(404).json({ error: "No subscription found" });
+    return;
+  }
+
+  const now = new Date();
+  const isActive = sub.expiresAt > now;
+  const daysRemaining = Math.max(0, Math.ceil((sub.expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
+
+  const PLAN_LABELS: Record<string, string> = {
+    trial: "Prueba gratuita",
+    daily: "Diario",
+    weekly: "Semanal",
+    biweekly: "Quincenal",
+    monthly: "Mensual",
+  };
+
+  res.json({
+    id: sub.id,
+    plan: sub.plan,
+    planLabel: PLAN_LABELS[sub.plan] ?? sub.plan,
+    priceCop: sub.priceCop,
+    startsAt: sub.startsAt.toISOString(),
+    expiresAt: sub.expiresAt.toISOString(),
+    isTrial: sub.isTrial,
+    isActive,
+    daysRemaining,
+  });
 });
 
 export default router;
