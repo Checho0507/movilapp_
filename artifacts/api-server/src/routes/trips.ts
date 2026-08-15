@@ -505,10 +505,3 @@ router.post("/:id/rating", authenticate, async (req, res) => {
 });
 
 export default router;
-
-    const [sub] = await db
-      .select({ expiresAt: subscriptionsTable.expiresAt })
-      .from(subscriptionsTable)
-      .where(eq(subscriptionsTable.driverId, user.userId))
-      .orderBy(desc(subscriptionsTable.expiresAt))
-      .limit(1);
