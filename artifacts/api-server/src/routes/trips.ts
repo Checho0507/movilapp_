@@ -186,18 +186,12 @@ router.get("/", authenticate, async (req, res) => {
   const trips = await db
     .select()
     .from(tripsTable)
-    .where(
-      and(
-        eq(tripsTable.status, "pending"),
-        sql`${tripsTable.originLat}::numeric BETWEEN ${latN - deltaLat} AND ${latN + deltaLat}`,
-        sql`${tripsTable.originLng}::numeric BETWEEN ${lngN - deltaLng} AND ${lngN + deltaLng}`
-      )
-    )
+    .where(and(...conditions))
     .orderBy(desc(tripsTable.createdAt))
-    .limit(20);
+    .limit(parseInt(limit))
+    .offset(parseInt(offset));
 
-  const enriched = await enrichTrip(updated);
-  res.json(enriched);
+  res.json(trips.map(t => formatTrip(t)));
 });
 
 // POST /api/trips

@@ -434,7 +434,8 @@ function DriverHome() {
   const { user, updateUser } = useAuth();
   const { socket } = useSocket();
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const [isOnline, setIsOnline] = useState(user?.isOnline ?? false);
+  // Always start offline — drivers must manually connect each session
+  const [isOnline, setIsOnline] = useState(false);
   const [requests, setRequests] = useState<any[]>([]);
   const [acceptingId, setAcceptingId] = useState<number | null>(null);
   const [panicPending, setPanicPending] = useState(false);
@@ -442,6 +443,13 @@ function DriverHome() {
   const updateStatus = useUpdateDriverStatus();
   const updateLocation = useUpdateDriverLocation();
   const acceptTrip = useUpdateTripStatus();
+
+  // On mount, force the server state to offline so previous sessions don't linger
+  useEffect(() => {
+    updateStatus.mutate({ data: { isOnline: false } });
+    updateUser({ isOnline: false });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let sub: Location.LocationSubscription | null = null;
@@ -550,7 +558,8 @@ function DriverHome() {
       if (!next) setRequests([]);
     } catch (e: any) {
       const err = e?.data ?? e;
-      if (err?.code === 'SUBSCRIPTION_REQUIRED' || e?.status === 403) {
+      const httpStatus = e?.response?.status ?? e?.status;
+      if (err?.code === 'SUBSCRIPTION_REQUIRED' || httpStatus === 403) {
         Alert.alert(
           '⚠️ Suscripción requerida',
           err?.error ?? 'Tu suscripción ha vencido. Contacta al administrador para renovar tu plan.',

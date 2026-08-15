@@ -44,11 +44,10 @@ router.patch("/status", authenticate, requireRole("driver"), async (req, res) =>
 
   const [user] = await db
     .update(usersTable)
-    .set({ acceptedPayments: sanitized })
+    .set({ isOnline })
     .where(eq(usersTable.id, req.user!.userId))
     .returning();
 
-  // If forcibly going offline (e.g. subscription expired mid-session), clear pending requests
   io?.emit("driver_status_changed", { driverId: user.id, isOnline });
 
   res.json(formatUser(user));
@@ -61,7 +60,7 @@ router.patch("/location", authenticate, requireRole("driver"), async (req, res) 
 
   const [user] = await db
     .update(usersTable)
-    .set({ acceptedPayments: sanitized })
+    .set({ currentLat: String(lat), currentLng: String(lng) })
     .where(eq(usersTable.id, req.user!.userId))
     .returning();
 
