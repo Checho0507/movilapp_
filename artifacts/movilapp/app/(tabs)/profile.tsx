@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ScrollView, ActivityIndicator,
+  View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ScrollView,
+  ActivityIndicator, Modal, TextInput,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -228,10 +229,194 @@ function PaymentMethodsCard({
   );
 }
 
+const PLATE_REGEX = /^[A-Z]{3}[0-9]{3}$/;
+const VEHICLE_TYPES = [
+  { key: 'taxi',       label: 'Taxi' },
+  { key: 'particular', label: 'Particular' },
+  { key: 'moto',       label: 'Moto' },
+];
+
+function VehicleModal({
+  visible,
+  onClose,
+  onRegistered,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onRegistered: () => void;
+}) {
+  const [plate, setPlate] = useState('');
+  const [plateError, setPlateError] = useState('');
+  const [brand, setBrand] = useState('');
+  const [model, setModel] = useState('');
+  const [color, setColor] = useState('');
+  const [vehicleType, setVehicleType] = useState('taxi');
+  const [saving, setSaving] = useState(false);
+
+  const handlePlateChange = (text: string) => {
+    const normalized = text.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    setPlate(normalized);
+    if (normalized.length === 6) {
+      setPlateError(PLATE_REGEX.test(normalized) ? '' : 'La placa debe tener el formato AAA123');
+    } else {
+      setPlateError('');
+    }
+  };
+
+  const handleSubmit = async () => {
+    const trimmedPlate = plate.trim();
+    if (!PLATE_REGEX.test(trimmedPlate)) {
+      setPlateError('La placa debe tener el formato AAA123 (3 letras + 3 números)');
+      return;
+    }
+    if (!brand.trim() || !model.trim() || !color.trim()) {
+      Alert.alert('Campos incompletos', 'Por favor completa todos los campos.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const token = await AsyncStorage.getItem('auth_token');
+      const res = await fetch(`${BASE_URL}/vehicles`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ plate: trimmedPlate, brand: brand.trim(), model: model.trim(), color: color.trim(), vehicleType }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        const msg: Record<string, string> = {
+          plate_trial_used: 'Esta placa ya usó el período de prueba en otra cuenta.',
+          already_subscribed: 'Ya tienes un vehículo registrado con suscripción activa.',
+        };
+        Alert.alert('No se pudo registrar', msg[body.code] ?? body.error ?? 'Error al registrar el vehículo.');
+        return;
+      }
+      Alert.alert('¡Vehículo registrado!', `Tu período de prueba de ${body.trialDays ?? 60} días ha comenzado.`);
+      onRegistered();
+      onClose();
+    } catch {
+      Alert.alert('Error', 'No se pudo conectar con el servidor.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reset = () => {
+    setPlate(''); setPlateError(''); setBrand(''); setModel(''); setColor(''); setVehicleType('taxi');
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalCard}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Registrar vehículo</Text>
+            <TouchableOpacity onPress={() => { reset(); onClose(); }} style={styles.modalCloseBtn}>
+              <Feather name="x" size={20} color={colors.light.mutedForeground} />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 480 }}
+            contentContainerStyle={{ gap: 16, paddingBottom: 8 }}>
+
+            {/* Plate */}
+            <View style={styles.modalField}>
+              <Text style={styles.modalLabel}>Placa del vehículo</Text>
+              <TextInput
+                style={[styles.modalInput, plateError ? styles.modalInputError : null]}
+                value={plate}
+                onChangeText={handlePlateChange}
+                placeholder="AAA123"
+                placeholderTextColor={colors.light.mutedForeground}
+                autoCapitalize="characters"
+                maxLength={6}
+              />
+              {plateError ? (
+                <Text style={styles.modalInputErrorText}>{plateError}</Text>
+              ) : (
+                <Text style={styles.modalHint}>3 letras seguidas de 3 números, sin espacios ni guiones.</Text>
+              )}
+            </View>
+
+            {/* Vehicle type */}
+            <View style={styles.modalField}>
+              <Text style={styles.modalLabel}>Tipo de vehículo</Text>
+              <View style={styles.typeRow}>
+                {VEHICLE_TYPES.map(t => (
+                  <TouchableOpacity
+                    key={t.key}
+                    style={[styles.typeChip, vehicleType === t.key && styles.typeChipActive]}
+                    onPress={() => setVehicleType(t.key)}
+                  >
+                    <Text style={[styles.typeChipText, vehicleType === t.key && styles.typeChipTextActive]}>
+                      {t.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            {/* Brand */}
+            <View style={styles.modalField}>
+              <Text style={styles.modalLabel}>Marca</Text>
+              <TextInput
+                style={styles.modalInput}
+                value={brand}
+                onChangeText={setBrand}
+                placeholder="Chevrolet"
+                placeholderTextColor={colors.light.mutedForeground}
+                autoCapitalize="words"
+              />
+            </View>
+
+            {/* Model */}
+            <View style={styles.modalField}>
+              <Text style={styles.modalLabel}>Modelo</Text>
+              <TextInput
+                style={styles.modalInput}
+                value={model}
+                onChangeText={setModel}
+                placeholder="Spark GT"
+                placeholderTextColor={colors.light.mutedForeground}
+                autoCapitalize="words"
+              />
+            </View>
+
+            {/* Color */}
+            <View style={styles.modalField}>
+              <Text style={styles.modalLabel}>Color</Text>
+              <TextInput
+                style={styles.modalInput}
+                value={color}
+                onChangeText={setColor}
+                placeholder="Blanco"
+                placeholderTextColor={colors.light.mutedForeground}
+                autoCapitalize="words"
+              />
+            </View>
+          </ScrollView>
+
+          <View style={styles.modalActions}>
+            <TouchableOpacity style={styles.modalCancelBtn} onPress={() => { reset(); onClose(); }} disabled={saving}>
+              <Text style={styles.modalCancelText}>Cancelar</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.modalSaveBtn} onPress={handleSubmit} disabled={saving}>
+              {saving
+                ? <ActivityIndicator size="small" color={colors.light.primaryForeground} />
+                : <Text style={styles.modalSaveText}>Registrar</Text>
+              }
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
   const { user, logout, updateUser } = useAuth();
   const queryClient = useQueryClient();
+  const [showVehicleModal, setShowVehicleModal] = useState(false);
 
   const {
     data: subscription,
@@ -340,8 +525,18 @@ export default function ProfileScreen() {
               Cada placa solo puede usar el período de prueba una vez.
             </Text>
           </View>
+          <TouchableOpacity style={styles.registerVehicleBtn} onPress={() => setShowVehicleModal(true)} activeOpacity={0.85}>
+            <Feather name="truck" size={16} color={colors.light.primaryForeground} />
+            <Text style={styles.registerVehicleText}>Registrar mi vehículo</Text>
+          </TouchableOpacity>
         </View>
       )}
+
+      <VehicleModal
+        visible={showVehicleModal}
+        onClose={() => setShowVehicleModal(false)}
+        onRegistered={() => queryClient.invalidateQueries({ queryKey: ['my-subscription'] })}
+      />
 
       {/* Prominent warning when driver has no subscription at all */}
       {user.role === 'driver' && !subscription && (
@@ -536,4 +731,49 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.light.border,
   },
   noSubNoteText: { flex: 1, fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', lineHeight: 16 },
+  registerVehicleBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    backgroundColor: colors.light.primary, borderRadius: colors.radius,
+    paddingVertical: 12,
+  },
+  registerVehicleText: { fontSize: 14, fontWeight: '700', color: colors.light.primaryForeground, fontFamily: 'Inter_700Bold' },
+  // Vehicle registration modal
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  modalCard: {
+    backgroundColor: colors.light.card, borderTopLeftRadius: 20, borderTopRightRadius: 20,
+    padding: 24, gap: 20,
+  },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  modalTitle: { fontSize: 18, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  modalCloseBtn: { padding: 4 },
+  modalField: { gap: 6 },
+  modalLabel: { fontSize: 13, fontWeight: '600', color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold' },
+  modalInput: {
+    backgroundColor: colors.light.input, borderWidth: 1, borderColor: colors.light.border,
+    borderRadius: colors.radius, paddingHorizontal: 14, paddingVertical: 12,
+    fontSize: 16, color: colors.light.foreground, fontFamily: 'Inter_400Regular',
+    letterSpacing: 1,
+  },
+  modalInputError: { borderColor: colors.light.destructive },
+  modalInputErrorText: { fontSize: 12, color: colors.light.destructive, fontFamily: 'Inter_400Regular' },
+  modalHint: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
+  typeRow: { flexDirection: 'row', gap: 8 },
+  typeChip: {
+    flex: 1, paddingVertical: 10, borderRadius: colors.radius, alignItems: 'center',
+    backgroundColor: colors.light.secondary, borderWidth: 1, borderColor: colors.light.border,
+  },
+  typeChipActive: { backgroundColor: colors.light.primary, borderColor: colors.light.primary },
+  typeChipText: { fontSize: 14, fontWeight: '600', color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold' },
+  typeChipTextActive: { color: colors.light.primaryForeground },
+  modalActions: { flexDirection: 'row', gap: 12 },
+  modalCancelBtn: {
+    flex: 1, paddingVertical: 13, borderRadius: colors.radius, alignItems: 'center',
+    backgroundColor: colors.light.secondary, borderWidth: 1, borderColor: colors.light.border,
+  },
+  modalCancelText: { fontSize: 15, fontWeight: '600', color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold' },
+  modalSaveBtn: {
+    flex: 1, paddingVertical: 13, borderRadius: colors.radius, alignItems: 'center',
+    backgroundColor: colors.light.primary,
+  },
+  modalSaveText: { fontSize: 15, fontWeight: '700', color: colors.light.primaryForeground, fontFamily: 'Inter_700Bold' },
 });
