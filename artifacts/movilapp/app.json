@@ -16,8 +16,8 @@
     "ios": {
       "supportsTablet": false,
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "MóvilApp usa tu ubicación para mostrar conductores cercanos y rastrear tu viaje en tiempo real.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "MóvilApp usa tu ubicación en segundo plano para actualizar tu posición mientras conduces."
+        "NSLocationWhenInUseUsageDescription": "MovilApp usa tu ubicación para mostrar conductores cercanos y rastrear tu viaje en tiempo real.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "MovilApp usa tu ubicación en segundo plano para actualizar tu posición mientras conduces."
       },
       "bundleIdentifier": "com.movilapp.app"
     },
@@ -43,8 +43,8 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "MóvilApp usa tu ubicación para mostrarte conductores cercanos y rastrear tu viaje.",
-          "locationWhenInUsePermission": "MóvilApp usa tu ubicación para mostrarte conductores cercanos y rastrear tu viaje."
+          "locationAlwaysAndWhenInUsePermission": "MovilApp usa tu ubicación para mostrarte conductores cercanos y rastrear tu viaje.",
+          "locationWhenInUsePermission": "MovilApp usa tu ubicación para mostrarte conductores cercanos y rastrear tu viaje."
         }
       ]
     ],

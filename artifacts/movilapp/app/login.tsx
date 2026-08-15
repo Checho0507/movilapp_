@@ -101,7 +101,7 @@ export default function LoginScreen() {
             resizeMode="contain"
           />
         </View>
-        <Text style={styles.appName}>MóvilApp</Text>
+        <Text style={styles.appName}>MovilApp</Text>
         <Text style={styles.tagline}>Tu movilidad, a un toque</Text>
       </View>
 

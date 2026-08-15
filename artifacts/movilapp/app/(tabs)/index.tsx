@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
-  Platform, Alert, Animated, Vibration,
+  Platform, Alert, Animated, Vibration, Image,
 } from 'react-native';
 import { MapView, Marker, PROVIDER_DEFAULT } from '@/lib/maps';
 import type { Region } from '@/lib/maps';
@@ -34,7 +34,7 @@ async function reverseGeocode(lat: number, lng: number): Promise<string> {
   try {
     const res = await fetch(
       `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=es`,
-      { headers: { 'User-Agent': 'MóvilApp/1.0' } },
+      { headers: { 'User-Agent': 'MovilApp/1.0' } },
     );
     const data = await res.json();
     if (data.display_name) {
@@ -614,14 +614,15 @@ function DriverHome() {
 
   return (
     <View style={styles.root}>
-      <MapView
-        style={StyleSheet.absoluteFill}
-        provider={PROVIDER_DEFAULT}
-        initialRegion={BOGOTA}
-        region={location ? { latitude: location.lat, longitude: location.lng, latitudeDelta: 0.04, longitudeDelta: 0.04 } : undefined}
-        showsUserLocation
-        showsMyLocationButton={false}
-      />
+      <View style={styles.brandWrap}>
+        <Image
+          source={require('@/assets/images/logo.png')}
+          style={styles.brandLogo}
+          resizeMode="contain"
+        />
+        <Text style={styles.brandName}>MovilApp</Text>
+        <Text style={styles.brandTagline}>Tu servicio de taxi confiable</Text>
+      </View>
 
       <View style={[styles.topLabel, { top: insets.top + (Platform.OS === 'web' ? 67 : 16) }]}>
         <View style={styles.driverTopRow}>
@@ -721,6 +722,10 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.light.background },
+  brandWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 32 },
+  brandLogo: { width: 140, height: 140 },
+  brandName: { fontSize: 30, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  brandTagline: { fontSize: 14, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
   crosshairWrap: {
     position: 'absolute', left: 0, right: 0, top: 0, bottom: 0,
     alignItems: 'center', justifyContent: 'center',

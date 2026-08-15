@@ -230,11 +230,6 @@ function PaymentMethodsCard({
 }
 
 const PLATE_REGEX = /^[A-Z]{3}[0-9]{3}$/;
-const VEHICLE_TYPES = [
-  { key: 'taxi',       label: 'Taxi' },
-  { key: 'particular', label: 'Particular' },
-  { key: 'moto',       label: 'Moto' },
-];
 
 function VehicleModal({
   visible,
@@ -250,7 +245,6 @@ function VehicleModal({
   const [brand, setBrand] = useState('');
   const [model, setModel] = useState('');
   const [color, setColor] = useState('');
-  const [vehicleType, setVehicleType] = useState('taxi');
   const [saving, setSaving] = useState(false);
 
   const handlePlateChange = (text: string) => {
@@ -279,7 +273,7 @@ function VehicleModal({
       const res = await fetch(`${BASE_URL}/vehicles`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ plate: trimmedPlate, brand: brand.trim(), model: model.trim(), color: color.trim(), vehicleType }),
+        body: JSON.stringify({ plate: trimmedPlate, brand: brand.trim(), model: model.trim(), color: color.trim(), vehicleType: 'taxi' }),
       });
       const body = await res.json();
       if (!res.ok) {
@@ -301,7 +295,7 @@ function VehicleModal({
   };
 
   const reset = () => {
-    setPlate(''); setPlateError(''); setBrand(''); setModel(''); setColor(''); setVehicleType('taxi');
+    setPlate(''); setPlateError(''); setBrand(''); setModel(''); setColor('');
   };
 
   return (
@@ -335,24 +329,6 @@ function VehicleModal({
               ) : (
                 <Text style={styles.modalHint}>3 letras seguidas de 3 números, sin espacios ni guiones.</Text>
               )}
-            </View>
-
-            {/* Vehicle type */}
-            <View style={styles.modalField}>
-              <Text style={styles.modalLabel}>Tipo de vehículo</Text>
-              <View style={styles.typeRow}>
-                {VEHICLE_TYPES.map(t => (
-                  <TouchableOpacity
-                    key={t.key}
-                    style={[styles.typeChip, vehicleType === t.key && styles.typeChipActive]}
-                    onPress={() => setVehicleType(t.key)}
-                  >
-                    <Text style={[styles.typeChipText, vehicleType === t.key && styles.typeChipTextActive]}>
-                      {t.label}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
             </View>
 
             {/* Brand */}
@@ -543,7 +519,7 @@ export default function ProfileScreen() {
         <View style={styles.noSubBanner}>
           <View style={styles.noSubIconRow}>
             <Feather name="alert-triangle" size={22} color={colors.light.destructive} />
-            <Text style={styles.noSubTitle}>Sin suscripción activa</Text>
+            <Text style={styles.noSubBannerTitle}>Sin suscripción activa</Text>
           </View>
           <Text style={styles.noSubBody}>
             No tienes ninguna suscripción registrada. No puedes conectarte ni aceptar viajes hasta que un administrador active tu plan.
@@ -722,7 +698,7 @@ const styles = StyleSheet.create({
     padding: 16, marginBottom: 16, gap: 10,
   },
   noSubHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  noSubTitle: { fontSize: 15, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  noSubBannerTitle: { fontSize: 15, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
   noSubText: { fontSize: 13, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', lineHeight: 19 },
   noSubNote: {
     flexDirection: 'row', gap: 8, alignItems: 'flex-start',
@@ -757,14 +733,6 @@ const styles = StyleSheet.create({
   modalInputError: { borderColor: colors.light.destructive },
   modalInputErrorText: { fontSize: 12, color: colors.light.destructive, fontFamily: 'Inter_400Regular' },
   modalHint: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
-  typeRow: { flexDirection: 'row', gap: 8 },
-  typeChip: {
-    flex: 1, paddingVertical: 10, borderRadius: colors.radius, alignItems: 'center',
-    backgroundColor: colors.light.secondary, borderWidth: 1, borderColor: colors.light.border,
-  },
-  typeChipActive: { backgroundColor: colors.light.primary, borderColor: colors.light.primary },
-  typeChipText: { fontSize: 14, fontWeight: '600', color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold' },
-  typeChipTextActive: { color: colors.light.primaryForeground },
   modalActions: { flexDirection: 'row', gap: 12 },
   modalCancelBtn: {
     flex: 1, paddingVertical: 13, borderRadius: colors.radius, alignItems: 'center',

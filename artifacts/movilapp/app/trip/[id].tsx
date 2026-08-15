@@ -49,7 +49,7 @@ async function fetchOSRMRoute(
 ): Promise<{ latitude: number; longitude: number }[]> {
   try {
     const url = `https://router.project-osrm.org/route/v1/driving/${oLng},${oLat};${dLng},${dLat}?overview=full&geometries=geojson`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'MóvilApp/1.0' } });
+    const res = await fetch(url, { headers: { 'User-Agent': 'MovilApp/1.0' } });
     const json = await res.json();
     if (json.routes?.[0]) {
       return (json.routes[0].geometry.coordinates as [number, number][]).map(
