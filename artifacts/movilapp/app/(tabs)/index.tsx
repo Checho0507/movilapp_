@@ -483,7 +483,10 @@ function DriverHome() {
       Alert.alert(
         '⚠️ Suscripción vencida',
         data.message ?? 'Tu suscripción ha vencido. Has sido desconectado automáticamente.',
-        [{ text: 'Entendido' }],
+        [
+          { text: 'Ver suscripción', onPress: () => router.push('/(tabs)/profile') },
+          { text: 'Entendido' },
+        ],
       );
     };
     socket.on('driver:subscription_expired', handler);
