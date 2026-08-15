@@ -3,6 +3,7 @@ import { Server as IOServer } from "socket.io";
 import app from "./app.js";
 import { initIO } from "./routes/index.js";
 import { logger } from "./lib/logger.js";
+import { startSubscriptionExpiryJob } from "./jobs/subscriptionExpiry.js";
 
 const rawPort = process.env["PORT"];
 
@@ -26,6 +27,7 @@ const io = new IOServer(httpServer, {
 });
 
 initIO(io);
+startSubscriptionExpiryJob(io);
 
 io.on("connection", (socket) => {
   logger.info({ socketId: socket.id }, "Socket connected");

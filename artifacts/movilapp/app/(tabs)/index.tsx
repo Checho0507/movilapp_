@@ -473,6 +473,23 @@ function DriverHome() {
     return () => { socket.off('trip:new_request', handler); };
   }, [socket, isOnline]);
 
+  // Listen for forced-offline event when subscription expires mid-session
+  useEffect(() => {
+    if (!socket) return;
+    const handler = (data: { message: string }) => {
+      setIsOnline(false);
+      updateUser({ isOnline: false });
+      setRequests([]);
+      Alert.alert(
+        '⚠️ Suscripción vencida',
+        data.message ?? 'Tu suscripción ha vencido. Has sido desconectado automáticamente.',
+        [{ text: 'Entendido' }],
+      );
+    };
+    socket.on('driver:subscription_expired', handler);
+    return () => { socket.off('driver:subscription_expired', handler); };
+  }, [socket]);
+
   // Listen for panic alerts from OTHER drivers
   useEffect(() => {
     if (!socket) return;
