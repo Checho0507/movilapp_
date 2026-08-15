@@ -547,7 +547,7 @@ function DriverHome() {
       if (!next) setRequests([]);
     } catch (e: any) {
       const err = e?.data ?? e;
-      if (err?.code === 'SUBSCRIPTION_REQUIRED' || e?.status === 402) {
+      if (err?.code === 'SUBSCRIPTION_REQUIRED' || e?.status === 403) {
         Alert.alert(
           '⚠️ Suscripción requerida',
           err?.error ?? 'Tu suscripción ha vencido. Contacta al administrador para renovar tu plan.',
