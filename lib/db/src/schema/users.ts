@@ -14,7 +14,7 @@ export const usersTable = pgTable("users", {
   isOnline: boolean("is_online").notNull().default(false),
   currentLat: numeric("current_lat"),
   currentLng: numeric("current_lng"),
-  rating: numeric("rating").notNull().default("5.0"),
+  rating: numeric("rating").notNull().default(5.0),
   ratingCount: integer("rating_count").notNull().default(0),
   /** Digital payment methods the driver accepts (nequi | daviplata | breve). All drivers accept cash. */
   acceptedPayments: text("accepted_payments").array().notNull().default(sql`'{}'`),
