@@ -33,46 +33,162 @@ type Pin = { lat: number; lng: number; address: string };
 
 type SearchResult = { lat: number; lng: number; address: string };
 
-// Search addresses anywhere in Colombia, prioritizing results near the user
-async function searchAddress(query: string, near: { lat: number; lng: number } | null): Promise<SearchResult[]> {
+const NOMINATIM = 'https://nominatim.openstreetmap.org';
+const UA = { 'User-Agent': 'MovilApp/1.0' };
+
+// Expand common Colombian address abbreviations so the geocoder understands them
+function normalizeAddress(raw: string): string {
+  let s = ' ' + raw.trim() + ' ';
+  const subs: [RegExp, string][] = [
+    [/\s(cra|cr|kra|kr|carr)\.?(?=[\s\d#])/gi, ' Carrera'],
+    [/\s(cll|cl|cle)\.?(?=[\s\d#])/gi, ' Calle'],
+    [/\s(av|avda)\.?(?=[\s\d#])/gi, ' Avenida'],
+    [/\s(dg|diag)\.?(?=[\s\d#])/gi, ' Diagonal'],
+    [/\s(tv|transv|trans)\.?(?=[\s\d#])/gi, ' Transversal'],
+    [/\s(no|nro|num)\.?(?=[\s\d#])/gi, ' #'],
+  ];
+  for (const [re, rep] of subs) s = s.replace(re, rep);
+  // "#11A09" / "# 11A-09" → "# 11A-09" (insert dash between cross-street number and house number)
+  s = s.replace(/#\s*(\d+[a-zA-Z]?)\s*[-–]?\s*(\d+)/g, '# $1-$2');
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+// Parse "Carrera 44 # 11A-09" → main street + implied cross street (Calle 11A)
+function parseColombianAddress(normalized: string): { main: string; cross: string; plate: string } | null {
+  const m = normalized.match(/(Carrera|Calle|Avenida|Diagonal|Transversal)\s+(\d+[a-zA-Z]{0,2})\s*(bis)?\s*#\s*(\d+[a-zA-Z]{0,2})\s*-\s*(\d+)/i);
+  if (!m) return null;
+  const [, type, num, bis, crossNum, house] = m;
+  const t = type.toLowerCase();
+  // In Colombian nomenclature, Carreras cross Calles and vice versa
+  const crossType = (t === 'carrera' || t === 'transversal') ? 'Calle' : 'Carrera';
+  const mainName = bis ? `${type} ${num} Bis` : `${type} ${num}`;
+  return {
+    main: mainName,
+    cross: `${crossType} ${crossNum}`,
+    plate: `${mainName} # ${crossNum}-${house}`,
+  };
+}
+
+async function nominatimSearch(params: string, limit = 6): Promise<any[]> {
   try {
-    let url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=6&countrycodes=co&accept-language=es`;
-    if (near) {
-      // Bias (not restrict) results toward a ~60 km box around the user
-      const d = 0.55;
-      url += `&viewbox=${near.lng - d},${near.lat + d},${near.lng + d},${near.lat - d}`;
-    }
-    const res = await fetch(url, { headers: { 'User-Agent': 'MovilApp/1.0' } });
+    const res = await fetch(
+      `${NOMINATIM}/search?format=json&limit=${limit}&countrycodes=co&accept-language=es&${params}`,
+      { headers: UA },
+    );
     const data = await res.json();
-    if (!Array.isArray(data)) return [];
-    const results: SearchResult[] = data.map((r: any) => ({
-      lat: parseFloat(r.lat),
-      lng: parseFloat(r.lon),
-      address: (r.display_name as string).split(',').slice(0, 4).join(',').trim(),
-    }));
-    if (near) {
-      results.sort((a, b) =>
-        haversine(near.lat, near.lng, a.lat, a.lng) - haversine(near.lat, near.lng, b.lat, b.lng));
-    }
-    return results;
+    return Array.isArray(data) ? data : [];
   } catch {
     return [];
   }
 }
 
-async function reverseGeocode(lat: number, lng: number): Promise<string> {
+function toResult(r: any): SearchResult {
+  return {
+    lat: parseFloat(r.lat),
+    lng: parseFloat(r.lon),
+    address: (r.display_name as string).split(',').slice(0, 4).join(',').trim(),
+  };
+}
+
+// Does the query already mention a city/municipality name (rough check: any word of the
+// detected city appears), or contain a comma-separated locality?
+function queryMentionsCity(query: string, city: string | null): boolean {
+  if (/,/.test(query)) return true;
+  if (!city) return false;
+  return query.toLowerCase().includes(city.toLowerCase());
+}
+
+// Search addresses anywhere in Colombia. Automatically scopes to the user's GPS-detected
+// city when the query doesn't mention one, and resolves Colombian plates
+// ("Carrera 44 # 11A-09") to the street intersection so the pin lands in the right barrio.
+async function searchAddress(
+  query: string,
+  near: { lat: number; lng: number } | null,
+  city: string | null,
+): Promise<SearchResult[]> {
+  const normalized = normalizeAddress(query);
+  const parsed = parseColombianAddress(normalized);
+  const useCity = !queryMentionsCity(normalized, city) ? city : null;
+  const fullQuery = useCity ? `${normalized}, ${useCity}` : normalized;
+
+  // 1) Direct search (may hit an exact house number if mapped)
+  let viewbox = '';
+  if (near) {
+    const d = 0.55; // bias (not restrict) toward ~60 km around the user
+    viewbox = `&viewbox=${near.lng - d},${near.lat + d},${near.lng + d},${near.lat - d}`;
+  }
+  let direct = await nominatimSearch(`q=${encodeURIComponent(fullQuery)}${viewbox}`);
+  // POI names (e.g. "parque lleras") often fail with an appended city — retry without it,
+  // first restricted to the user's area, then country-wide
+  if (direct.length === 0 && viewbox) {
+    direct = await nominatimSearch(`q=${encodeURIComponent(normalized)}${viewbox}&bounded=1`);
+  }
+  if (direct.length === 0 && useCity) {
+    direct = await nominatimSearch(`q=${encodeURIComponent(normalized)}${viewbox}`);
+  }
+
+  // Exact building/house matches win
+  const exact = direct.filter((r: any) => r.type === 'house' || r.class === 'building' || r.addresstype === 'house');
+  if (exact.length > 0) {
+    const results = exact.map(toResult);
+    if (near) results.sort((a, b) => haversine(near.lat, near.lng, a.lat, a.lng) - haversine(near.lat, near.lng, b.lat, b.lng));
+    return results;
+  }
+
+  // 2) Colombian plate: approximate the intersection of the two streets.
+  // City scope: prefer the city the user typed (after a comma), else the GPS city.
+  if (parsed) {
+    const typedCity = /,/.test(query) ? query.split(',').pop()!.trim() : null;
+    const cityParam = typedCity || city || '';
+    const cityQ = cityParam ? `&city=${encodeURIComponent(cityParam)}` : '';
+    if (cityQ) {
+      const [mainSegs, crossSegs] = await Promise.all([
+        nominatimSearch(`street=${encodeURIComponent(parsed.main)}${cityQ}`, 20),
+        nominatimSearch(`street=${encodeURIComponent(parsed.cross)}${cityQ}`, 20),
+      ]);
+      let best: { d: number; a: any; b: any } | null = null;
+      for (const a of mainSegs) {
+        for (const b of crossSegs) {
+          const d = haversine(parseFloat(a.lat), parseFloat(a.lon), parseFloat(b.lat), parseFloat(b.lon));
+          if (!best || d < best.d) best = { d, a, b };
+        }
+      }
+      // Only trust the pair when the segments are close enough to plausibly intersect
+      if (best && best.d < 1.5) {
+        const lat = (parseFloat(best.a.lat) + parseFloat(best.b.lat)) / 2;
+        const lng = (parseFloat(best.a.lon) + parseFloat(best.b.lon)) / 2;
+        // Barrio/city come from the main street segment's display name (skip the street part)
+        const context = (best.a.display_name as string).split(',').slice(1, 4).join(',').trim();
+        const approx: SearchResult = { lat, lng, address: `${parsed.plate} (aprox.), ${context}` };
+        // Keep street matches as alternative options below the approximation
+        const others = direct.map(toResult);
+        return [approx, ...others.slice(0, 4)];
+      }
+    }
+  }
+
+  // 3) Fallback: street/place matches from the direct search
+  const results = direct.map(toResult);
+  if (near) results.sort((a, b) => haversine(near.lat, near.lng, a.lat, a.lng) - haversine(near.lat, near.lng, b.lat, b.lng));
+  return results;
+}
+
+// Reverse geocode: returns short address plus the detected city/municipality
+async function reverseGeocodeFull(lat: number, lng: number): Promise<{ address: string; city: string | null }> {
   try {
     const res = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=es`,
-      { headers: { 'User-Agent': 'MovilApp/1.0' } },
+      `${NOMINATIM}/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=es`,
+      { headers: UA },
     );
     const data = await res.json();
+    const a = data.address ?? {};
+    const city = a.city ?? a.town ?? a.municipality ?? a.village ?? null;
     if (data.display_name) {
       const parts = (data.display_name as string).split(',');
-      return parts.slice(0, 3).join(',').trim();
+      return { address: parts.slice(0, 3).join(',').trim(), city };
     }
   } catch { /* ignore */ }
-  return `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+  return { address: `${lat.toFixed(5)}, ${lng.toFixed(5)}`, city: null };
 }
 
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -104,6 +220,7 @@ function PassengerHome() {
 
   // Address search state
   const [userLoc, setUserLoc] = useState<{ lat: number; lng: number } | null>(null);
+  const [userCity, setUserCity] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -139,18 +256,22 @@ function PassengerHome() {
       setUserLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
       setRegion(r);
       mapRef.current?.animateToRegion(r, 600);
+      // Detect the user's city for automatic address scoping
+      const { city } = await reverseGeocodeFull(pos.coords.latitude, pos.coords.longitude);
+      if (city) setUserCity(city);
     })();
   }, []);
 
   // Debounced address search while typing (guarded against stale responses)
   useEffect(() => {
     if (step !== 'selectOrigin' && step !== 'selectDest') return;
+    if (pending) return; // a candidate was chosen; don't re-search until the user edits the text
     if (query.trim().length < 3) { setResults([]); setIsSearching(false); return; }
     const reqId = ++searchReqId.current;
     if (geocodeTimer.current) clearTimeout(geocodeTimer.current);
     geocodeTimer.current = setTimeout(async () => {
       setIsSearching(true);
-      const found = await searchAddress(query.trim(), userLoc);
+      const found = await searchAddress(query.trim(), userLoc, userCity);
       if (reqId !== searchReqId.current) return; // a newer search/step superseded this one
       setResults(found);
       setIsSearching(false);
@@ -160,7 +281,7 @@ function PassengerHome() {
       if (geocodeTimer.current) clearTimeout(geocodeTimer.current);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, step]);
+  }, [query, step, pending, userLoc, userCity]);
 
   const pickResult = (r: SearchResult) => {
     Keyboard.dismiss();
@@ -223,8 +344,9 @@ function PassengerHome() {
       const reg: Region = { latitude: lat, longitude: lng, latitudeDelta: 0.008, longitudeDelta: 0.008 };
       setRegion(reg);
       mapRef.current?.animateToRegion(reg, 500);
-      const addr = await reverseGeocode(lat, lng);
+      const { address: addr, city } = await reverseGeocodeFull(lat, lng);
       if (session !== selectSessionId.current) return;
+      if (city) setUserCity(city);
       setPending({ lat, lng, address: addr });
       setQuery(addr);
     } catch { /* user will type the address */ }
