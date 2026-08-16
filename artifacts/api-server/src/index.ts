@@ -39,19 +39,24 @@ io.on("connection", (socket) => {
   });
 
   // Client joins a trip room (passenger + driver both join)
-  socket.on("join_trip", (tripId: number) => {
+  // Accept both event spellings — the mobile client emits "join:trip"
+  const joinTrip = (tripId: number) => {
     socket.join(`trip:${tripId}`);
     logger.info({ tripId, socketId: socket.id }, "Joined trip room");
-  });
+  };
+  socket.on("join_trip", joinTrip);
+  socket.on("join:trip", joinTrip);
 
   // Driver location broadcasting room (passengers subscribe to driver)
   socket.on("watch_driver", (driverId: number) => {
     socket.join(`driver:${driverId}`);
   });
 
-  socket.on("leave_trip", (tripId: number) => {
+  const leaveTrip = (tripId: number) => {
     socket.leave(`trip:${tripId}`);
-  });
+  };
+  socket.on("leave_trip", leaveTrip);
+  socket.on("leave:trip", leaveTrip);
 
   socket.on("disconnect", () => {
     logger.info({ socketId: socket.id }, "Socket disconnected");

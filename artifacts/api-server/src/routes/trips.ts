@@ -212,9 +212,21 @@ router.post("/", authenticate, async (req, res) => {
     vehicleType: string; paymentMethod: string; estimatedPrice?: number;
   };
 
-  const [trip] = await db.select().from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
+  const [trip] = await db.insert(tripsTable).values({
+    passengerId: user.userId,
+    originLat: String(originLat),
+    originLng: String(originLng),
+    originAddress,
+    destinationLat: String(destinationLat),
+    destinationLng: String(destinationLng),
+    destinationAddress,
+    vehicleType,
+    paymentMethod,
+    estimatedPrice: String(estimatedPrice ?? 0),
+    status: "pending",
+  }).returning();
 
-  const enriched = await enrichTrip(updated);
+  const enriched = await enrichTrip(trip);
 
   // Notify only eligible online drivers within 1 km, filtered by payment method
   const eligibleIds = await getEligibleDriverIds(paymentMethod ?? "cash", originLat, originLng);
@@ -257,37 +269,23 @@ router.get("/nearby", authenticate, async (req, res) => {
     .orderBy(desc(tripsTable.createdAt))
     .limit(20);
 
-  const enriched = await enrichTrip(updated);
-
-  // Notify passenger and driver about status change
-  // Emit both the generic event (for home screen) and the status-specific event (for trip detail screen)
-  io?.to(`trip:${tripId}`).emit("trip_status_updated", enriched);
-  io?.to(`trip:${tripId}`).emit(`trip:${status}`, enriched);
-  io?.to(`user:${trip.passengerId}`).emit("trip_status_updated", enriched);
-  if (trip.driverId) io?.to(`user:${trip.driverId}`).emit("trip_status_updated", enriched);
-
+  const enriched = await Promise.all(trips.map(t => enrichTrip(t)));
   res.json(enriched);
 });
 
-// GET /api/trips/:id/messages
-router.get("/:id/messages", authenticate, async (req, res) => {
+// GET /api/trips/:id
+router.get("/:id", authenticate, async (req, res) => {
   const tripId = Number(req.params["id"]);
   const [trip] = await db.select().from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
   if (!trip) {
     res.status(404).json({ error: "Trip not found" });
     return;
   }
-
-  await db
-    .update(tripsTable)
-    .set({ actualPrice: String(Number(price)) })
-    .where(eq(tripsTable.id, tripId));
-
-  res.json({ ok: true });
+  res.json(await enrichTrip(trip));
 });
 
-// POST /api/trips/:id/rating
-router.post("/:id/rating", authenticate, async (req, res) => {
+// PATCH /api/trips/:id/status
+router.patch("/:id/status", authenticate, async (req, res) => {
   const tripId = Number(req.params["id"]);
   const user = req.user!;
   const { status, cancelReason, finalPrice } = req.body as {
@@ -302,9 +300,24 @@ router.post("/:id/rating", authenticate, async (req, res) => {
     return;
   }
 
-  const updates: Partial<typeof tripsTable.$inferInsert> = { status };
+  // Authorization: only the trip's passenger, the assigned driver,
+  // or (for acceptance) an online driver may change the trip status
+  const isParticipant = trip.passengerId === user.userId || trip.driverId === user.userId;
+  if (status === "accepted") {
+    if (user.role !== "driver") {
+      res.status(403).json({ error: "Solo un conductor puede aceptar carreras" });
+      return;
+    }
+    if (trip.status !== "pending") {
+      res.status(409).json({ error: "Esta carrera ya fue tomada o cancelada" });
+      return;
+    }
+  } else if (!isParticipant) {
+    res.status(403).json({ error: "No tienes permiso para modificar esta carrera" });
+    return;
+  }
 
-    const now = new Date();
+  const updates: Partial<typeof tripsTable.$inferInsert> = { status };
 
   if (status === "accepted") {
     // Verify the driver has an active subscription before allowing them to accept trips
@@ -339,11 +352,21 @@ router.post("/:id/rating", authenticate, async (req, res) => {
     if (cancelReason) updates.cancelReason = cancelReason;
   }
 
+  // For acceptance, claim atomically: only succeeds if the trip is still pending
+  const whereClause = status === "accepted"
+    ? and(eq(tripsTable.id, tripId), eq(tripsTable.status, "pending"))
+    : eq(tripsTable.id, tripId);
+
   const [updated] = await db
     .update(tripsTable)
     .set(updates)
-    .where(eq(tripsTable.id, tripId))
+    .where(whereClause)
     .returning();
+
+  if (!updated) {
+    res.status(409).json({ error: "Esta carrera ya fue tomada o cancelada" });
+    return;
+  }
 
   const enriched = await enrichTrip(updated);
 

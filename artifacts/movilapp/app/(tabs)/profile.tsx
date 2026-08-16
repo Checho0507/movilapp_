@@ -244,7 +244,6 @@ function VehicleModal({
   const [plateError, setPlateError] = useState('');
   const [brand, setBrand] = useState('');
   const [model, setModel] = useState('');
-  const [color, setColor] = useState('');
   const [saving, setSaving] = useState(false);
 
   const handlePlateChange = (text: string) => {
@@ -263,7 +262,7 @@ function VehicleModal({
       setPlateError('La placa debe tener el formato AAA123 (3 letras + 3 números)');
       return;
     }
-    if (!brand.trim() || !model.trim() || !color.trim()) {
+    if (!brand.trim() || !model.trim()) {
       Alert.alert('Campos incompletos', 'Por favor completa todos los campos.');
       return;
     }
@@ -273,7 +272,7 @@ function VehicleModal({
       const res = await fetch(`${BASE_URL}/vehicles`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ plate: trimmedPlate, brand: brand.trim(), model: model.trim(), color: color.trim(), vehicleType: 'taxi' }),
+        body: JSON.stringify({ plate: trimmedPlate, brand: brand.trim(), model: model.trim(), color: 'Amarillo', vehicleType: 'taxi' }),
       });
       const body = await res.json();
       if (!res.ok) {
@@ -295,7 +294,7 @@ function VehicleModal({
   };
 
   const reset = () => {
-    setPlate(''); setPlateError(''); setBrand(''); setModel(''); setColor('');
+    setPlate(''); setPlateError(''); setBrand(''); setModel('');
   };
 
   return (
@@ -357,18 +356,6 @@ function VehicleModal({
               />
             </View>
 
-            {/* Color */}
-            <View style={styles.modalField}>
-              <Text style={styles.modalLabel}>Color</Text>
-              <TextInput
-                style={styles.modalInput}
-                value={color}
-                onChangeText={setColor}
-                placeholder="Blanco"
-                placeholderTextColor={colors.light.mutedForeground}
-                autoCapitalize="words"
-              />
-            </View>
           </ScrollView>
 
           <View style={styles.modalActions}>
