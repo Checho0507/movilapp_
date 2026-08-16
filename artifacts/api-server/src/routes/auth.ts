@@ -65,6 +65,15 @@ router.post("/register", async (req, res) => {
     return;
   }
 
+  // Basic password strength check
+  if (typeof password !== 'string' || password.length < 8) {
+    res.status(400).json({ error: 'Password must be at least 8 characters long' });
+    return;
+  }
+
+  // Normalize email if provided
+  const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : null;
+
   const existing = await db.select().from(usersTable).where(eq(usersTable.phone, normalizedPhone)).limit(1);
   if (existing.length > 0) {
     res.status(409).json({ error: "Phone number already registered" });
@@ -78,7 +87,7 @@ router.post("/register", async (req, res) => {
       .values({
         name,
         phone: normalizedPhone,
-        email: email ?? null,
+        email: normalizedEmail ?? null,
         passwordHash,
         role,
         acceptedPayments: sanitizedPayments,
