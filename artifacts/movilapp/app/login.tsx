@@ -9,7 +9,6 @@ import {
   ActivityIndicator,
   Platform,
   Alert,
-  Image,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLoginUser, useRegisterUser } from '@workspace/api-client-react';
@@ -17,6 +16,8 @@ import { useAuth } from '@/context/AuthContext';
 import { router } from 'expo-router';
 import colors from '@/constants/colors';
 import { Feather } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import { BrandLogo } from '@/components/BrandLogo';
 
 type Role = 'passenger' | 'driver';
 type DigitalPayment = 'nequi' | 'daviplata' | 'breve';
@@ -84,26 +85,28 @@ export default function LoginScreen() {
   };
 
   return (
-    <ScrollView
-      style={styles.root}
-      contentContainerStyle={[styles.container, {
-        paddingTop: insets.top + (Platform.OS === 'web' ? 67 : 32),
-        paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 24),
-      }]}
-      keyboardShouldPersistTaps="handled"
+    <LinearGradient
+      colors={['#070B13', '#0F172A', '#111827']}
+      start={{ x: 0, y: 0 }}
+      end={{ x: 1, y: 1 }}
+      style={styles.gradient}
     >
-      {/* Logo */}
-      <View style={styles.logoArea}>
-        <View style={styles.logoSquare}>
-          <Image
-            source={require('../assets/images/logo.png')}
-            style={styles.logoImage}
-            resizeMode="contain"
-          />
+      <ScrollView
+        style={styles.root}
+        contentContainerStyle={[styles.container, {
+          paddingTop: insets.top + (Platform.OS === 'web' ? 67 : 32),
+          paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 24),
+        }]}
+        keyboardShouldPersistTaps="handled"
+      >
+        {/* Logo */}
+        <View style={styles.logoArea}>
+          <View style={styles.logoSquare}>
+            <BrandLogo size={88} style={styles.logoImage} />
+          </View>
+          <Text style={styles.appName}>MovilApp</Text>
+          <Text style={styles.tagline}>Tu movilidad, a un toque</Text>
         </View>
-        <Text style={styles.appName}>MovilApp</Text>
-        <Text style={styles.tagline}>Tu movilidad, a un toque</Text>
-      </View>
 
       {/* Toggle */}
       <View style={styles.toggle}>
@@ -243,22 +246,29 @@ export default function LoginScreen() {
           )}
         </TouchableOpacity>
       </View>
-    </ScrollView>
+      </ScrollView>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.light.background },
+  gradient: { flex: 1 },
+  root: { flex: 1, backgroundColor: 'transparent' },
   container: { paddingHorizontal: 24, flexGrow: 1 },
   logoArea: { alignItems: 'center', marginBottom: 40 },
   logoSquare: {
-    width: 110, height: 110, borderRadius: 26,
-    backgroundColor: '#08080F', alignItems: 'center', justifyContent: 'center',
-    marginBottom: 16, borderWidth: 1.5, borderColor: colors.light.border, overflow: 'hidden',
+    width: 120, height: 120, borderRadius: 30,
+    backgroundColor: 'rgba(9, 12, 18, 0.96)', alignItems: 'center', justifyContent: 'center',
+    marginBottom: 18, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.12)', overflow: 'hidden',
+    shadowColor: colors.light.primary,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.3,
+    shadowRadius: 18,
+    elevation: 10,
   },
-  logoImage: { width: 90, height: 90 },
-  appName: { fontSize: 28, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
-  tagline: { fontSize: 14, color: colors.light.mutedForeground, marginTop: 4, fontFamily: 'Inter_400Regular' },
+  logoImage: { width: 88, height: 88 },
+  appName: { fontSize: 30, fontWeight: '700', color: '#F8FAFC', fontFamily: 'Inter_700Bold', letterSpacing: 0.3 },
+  tagline: { fontSize: 14, color: '#B9C4D4', marginTop: 5, fontFamily: 'Inter_400Regular' },
   toggle: {
     flexDirection: 'row', backgroundColor: colors.light.secondary,
     borderRadius: colors.radius, padding: 4, marginBottom: 32,
