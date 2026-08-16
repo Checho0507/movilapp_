@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
-  Platform, Alert, Animated, Vibration, Image,
+  Platform, Alert, Animated, Vibration, Image, TextInput, ScrollView, Keyboard,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { MapView, Marker, PROVIDER_DEFAULT } from '@/lib/maps';
 import type { Region } from '@/lib/maps';
@@ -29,6 +30,35 @@ type PaymentKey = typeof PAYMENT_OPTIONS[number]['key'];
 
 type Step = 'idle' | 'selectOrigin' | 'selectDest' | 'confirm' | 'searching' | 'no_drivers';
 type Pin = { lat: number; lng: number; address: string };
+
+type SearchResult = { lat: number; lng: number; address: string };
+
+// Search addresses anywhere in Colombia, prioritizing results near the user
+async function searchAddress(query: string, near: { lat: number; lng: number } | null): Promise<SearchResult[]> {
+  try {
+    let url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=6&countrycodes=co&accept-language=es`;
+    if (near) {
+      // Bias (not restrict) results toward a ~60 km box around the user
+      const d = 0.55;
+      url += `&viewbox=${near.lng - d},${near.lat + d},${near.lng + d},${near.lat - d}`;
+    }
+    const res = await fetch(url, { headers: { 'User-Agent': 'MovilApp/1.0' } });
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    const results: SearchResult[] = data.map((r: any) => ({
+      lat: parseFloat(r.lat),
+      lng: parseFloat(r.lon),
+      address: (r.display_name as string).split(',').slice(0, 4).join(',').trim(),
+    }));
+    if (near) {
+      results.sort((a, b) =>
+        haversine(near.lat, near.lng, a.lat, a.lng) - haversine(near.lat, near.lng, b.lat, b.lng));
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
 
 async function reverseGeocode(lat: number, lng: number): Promise<string> {
   try {
@@ -65,14 +95,21 @@ function PassengerHome() {
 
   const [step, setStep] = useState<Step>('idle');
   const [region, setRegion] = useState<Region>(BOGOTA);
-  const [centerAddress, setCenterAddress] = useState('');
   const [origin, setOrigin] = useState<Pin | null>(null);
   const [dest, setDest] = useState<Pin | null>(null);
   const [estimatedPrice, setEstimatedPrice] = useState(0);
   const [distanceKm, setDistanceKm] = useState(0);
   const [activeTripId, setActiveTripId] = useState<number | null>(null);
-  const [isGeocoding, setIsGeocoding] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<PaymentKey>('cash');
+
+  // Address search state
+  const [userLoc, setUserLoc] = useState<{ lat: number; lng: number } | null>(null);
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [pending, setPending] = useState<Pin | null>(null); // candidate awaiting confirmation
+  const searchReqId = useRef(0);
+  const selectSessionId = useRef(0);
 
   const createTrip = useCreateTrip();
 
@@ -99,35 +136,45 @@ function PassengerHome() {
         latitude: pos.coords.latitude, longitude: pos.coords.longitude,
         latitudeDelta: 0.01, longitudeDelta: 0.01,
       };
+      setUserLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
       setRegion(r);
       mapRef.current?.animateToRegion(r, 600);
     })();
   }, []);
 
-  // Immediately geocode current center when entering selectDest
-  // (the map doesn't move so onRegionChangeComplete never fires on its own)
+  // Debounced address search while typing (guarded against stale responses)
   useEffect(() => {
-    if (step !== 'selectDest') return;
-    setIsGeocoding(true);
-    reverseGeocode(region.latitude, region.longitude).then(addr => {
-      setCenterAddress(addr);
-      setIsGeocoding(false);
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
-
-  // Reverse-geocode map center when in selection mode
-  const handleRegionChange = useCallback((r: Region) => {
-    setRegion(r);
     if (step !== 'selectOrigin' && step !== 'selectDest') return;
+    if (query.trim().length < 3) { setResults([]); setIsSearching(false); return; }
+    const reqId = ++searchReqId.current;
     if (geocodeTimer.current) clearTimeout(geocodeTimer.current);
     geocodeTimer.current = setTimeout(async () => {
-      setIsGeocoding(true);
-      const addr = await reverseGeocode(r.latitude, r.longitude);
-      setCenterAddress(addr);
-      setIsGeocoding(false);
-    }, 600);
-  }, [step]);
+      setIsSearching(true);
+      const found = await searchAddress(query.trim(), userLoc);
+      if (reqId !== searchReqId.current) return; // a newer search/step superseded this one
+      setResults(found);
+      setIsSearching(false);
+    }, 700);
+    return () => {
+      searchReqId.current++; // invalidate in-flight response
+      if (geocodeTimer.current) clearTimeout(geocodeTimer.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, step]);
+
+  const pickResult = (r: SearchResult) => {
+    Keyboard.dismiss();
+    setPending({ lat: r.lat, lng: r.lng, address: r.address });
+    setResults([]);
+    setQuery(r.address);
+    const reg: Region = { latitude: r.lat, longitude: r.lng, latitudeDelta: 0.008, longitudeDelta: 0.008 };
+    setRegion(reg);
+    mapRef.current?.animateToRegion(reg, 500);
+  };
+
+  const handleRegionChange = useCallback((r: Region) => {
+    setRegion(r);
+  }, []);
 
   // Estimate price when origin + dest are known
   useEffect(() => {
@@ -162,29 +209,42 @@ function PassengerHome() {
   }, [step, activeTripId, socket]);
 
   const startSelectOrigin = async () => {
-    // Center on current location
+    const session = ++selectSessionId.current;
+    setQuery('');
+    setResults([]);
+    setPending(null);
+    setStep('selectOrigin');
+    // Suggest current GPS location as the starting point
     try {
       const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      const r: Region = {
-        latitude: pos.coords.latitude, longitude: pos.coords.longitude,
-        latitudeDelta: 0.008, longitudeDelta: 0.008,
-      };
-      setRegion(r);
-      mapRef.current?.animateToRegion(r, 500);
-      const addr = await reverseGeocode(pos.coords.latitude, pos.coords.longitude);
-      setCenterAddress(addr);
-    } catch { setCenterAddress(''); }
-    setStep('selectOrigin');
+      if (session !== selectSessionId.current) return;
+      const { latitude: lat, longitude: lng } = pos.coords;
+      setUserLoc({ lat, lng });
+      const reg: Region = { latitude: lat, longitude: lng, latitudeDelta: 0.008, longitudeDelta: 0.008 };
+      setRegion(reg);
+      mapRef.current?.animateToRegion(reg, 500);
+      const addr = await reverseGeocode(lat, lng);
+      if (session !== selectSessionId.current) return;
+      setPending({ lat, lng, address: addr });
+      setQuery(addr);
+    } catch { /* user will type the address */ }
   };
 
   const confirmOrigin = () => {
-    setOrigin({ lat: region.latitude, lng: region.longitude, address: centerAddress });
-    setCenterAddress('');
+    if (!pending) return;
+    setOrigin(pending);
+    setPending(null);
+    setQuery('');
+    setResults([]);
     setStep('selectDest');
   };
 
   const confirmDest = () => {
-    setDest({ lat: region.latitude, lng: region.longitude, address: centerAddress });
+    if (!pending) return;
+    setDest(pending);
+    setPending(null);
+    setQuery('');
+    setResults([]);
     setStep('confirm');
   };
 
@@ -225,8 +285,12 @@ function PassengerHome() {
   };
 
   const resetSelection = () => {
+    selectSessionId.current++; // discard any in-flight GPS/geocode result
     setOrigin(null);
     setDest(null);
+    setPending(null);
+    setQuery('');
+    setResults([]);
     setStep('idle');
   };
 
@@ -244,7 +308,7 @@ function PassengerHome() {
         onRegionChangeComplete={handleRegionChange}
         showsUserLocation
         showsMyLocationButton={false}
-        scrollEnabled={isSelectingMode}
+        scrollEnabled={false}
         zoomEnabled
         pitchEnabled={false}
         rotateEnabled={false}
@@ -259,21 +323,18 @@ function PassengerHome() {
             <View style={[styles.markerDot, { backgroundColor: colors.light.destructive }]} />
           </Marker>
         )}
+        {pending && isSelectingMode && (
+          <Marker coordinate={{ latitude: pending.lat, longitude: pending.lng }} title={step === 'selectOrigin' ? 'Punto de partida' : 'Destino'}>
+            <View style={[styles.markerDot, { backgroundColor: pinColor }]} />
+          </Marker>
+        )}
       </MapView>
-
-      {/* Center crosshair (selection modes) */}
-      {isSelectingMode && (
-        <View pointerEvents="none" style={styles.crosshairWrap}>
-          <Feather name="map-pin" size={40} color={pinColor} style={{ marginBottom: -4 }} />
-          <View style={[styles.crosshairShadow, { backgroundColor: pinColor + '40' }]} />
-        </View>
-      )}
 
       {/* Top label (selection modes) */}
       {isSelectingMode && (
         <View style={[styles.topLabel, { top: insets.top + (Platform.OS === 'web' ? 67 : 16) }]}>
           <Text style={styles.topLabelText}>
-            {step === 'selectOrigin' ? '📍 Mueve el mapa para ajustar tu punto de partida' : '🎯 Mueve el mapa hasta tu destino'}
+            {step === 'selectOrigin' ? '📍 Escribe la dirección de tu punto de partida' : '🎯 Escribe la dirección de tu destino'}
           </Text>
         </View>
       )}
@@ -327,46 +388,90 @@ function PassengerHome() {
         </View>
       )}
 
-      {/* Bottom sheet — selecting origin */}
-      {step === 'selectOrigin' && (
-        <View style={[styles.sheet, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
-          <View style={styles.addressRow}>
-            <Feather name="circle" size={12} color={colors.light.primary} />
-            <Text style={styles.addressText} numberOfLines={2}>
-              {isGeocoding ? 'Localizando...' : centerAddress || 'Mueve el mapa...'}
-            </Text>
-          </View>
-          <TouchableOpacity style={styles.primaryBtn} onPress={confirmOrigin} activeOpacity={0.85}>
-            <Text style={styles.primaryBtnText}>Confirmar punto de partida</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.secondaryBtn} onPress={resetSelection}>
-            <Text style={styles.secondaryBtnText}>Cancelar</Text>
-          </TouchableOpacity>
-        </View>
-      )}
+      {/* Bottom sheet — address search (origin / destination) */}
+      {isSelectingMode && (
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.sheetKeyboardWrap}
+          pointerEvents="box-none"
+        >
+        <View style={[styles.sheet, styles.sheetStatic, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
+          {step === 'selectDest' && (
+            <View style={[styles.addressRow, { marginBottom: 6 }]}>
+              <Feather name="circle" size={10} color={colors.light.primary} />
+              <Text style={[styles.addressText, { color: colors.light.mutedForeground, fontSize: 13 }]} numberOfLines={1}>
+                {origin?.address}
+              </Text>
+            </View>
+          )}
 
-      {/* Bottom sheet — selecting destination */}
-      {step === 'selectDest' && (
-        <View style={[styles.sheet, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
-          <View style={[styles.addressRow, { marginBottom: 6 }]}>
-            <Feather name="circle" size={10} color={colors.light.primary} />
-            <Text style={[styles.addressText, { color: colors.light.mutedForeground, fontSize: 13 }]} numberOfLines={1}>
-              {origin?.address}
-            </Text>
+          <View style={styles.searchRow}>
+            <Feather
+              name={step === 'selectOrigin' ? 'circle' : 'map-pin'}
+              size={14}
+              color={pinColor}
+            />
+            <TextInput
+              style={styles.searchInput}
+              value={query}
+              onChangeText={(t) => { setQuery(t); setPending(null); }}
+              placeholder={step === 'selectOrigin' ? 'Ej: Calle 45 # 20-15, Medellín' : '¿A dónde vas? Ej: Cra 7 # 32-10'}
+              placeholderTextColor={colors.light.mutedForeground}
+              autoCorrect={false}
+            />
+            {isSearching && <ActivityIndicator size="small" color={colors.light.primary} />}
+            {!isSearching && query.length > 0 && (
+              <TouchableOpacity onPress={() => { setQuery(''); setResults([]); setPending(null); }}>
+                <Feather name="x" size={16} color={colors.light.mutedForeground} />
+              </TouchableOpacity>
+            )}
           </View>
-          <View style={[styles.addressRow, { marginBottom: 16 }]}>
-            <Feather name="map-pin" size={12} color={colors.light.destructive} />
-            <Text style={styles.addressText} numberOfLines={2}>
-              {isGeocoding ? 'Localizando...' : centerAddress || 'Mueve el mapa al destino...'}
+
+          {/* Search results */}
+          {results.length > 0 && (
+            <ScrollView style={styles.resultsList} keyboardShouldPersistTaps="handled">
+              {results.map((r, i) => (
+                <TouchableOpacity key={i} style={styles.resultRow} onPress={() => pickResult(r)} activeOpacity={0.7}>
+                  <Feather name="map-pin" size={14} color={colors.light.mutedForeground} />
+                  <Text style={styles.resultText} numberOfLines={2}>{r.address}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          )}
+          {results.length === 0 && !isSearching && !pending && query.trim().length >= 3 && (
+            <Text style={styles.noResultsText}>No encontramos esa dirección. Intenta agregar la ciudad, ej: "Calle 10 # 5-20, Cali"</Text>
+          )}
+
+          {/* Confirmation */}
+          {pending && (
+            <View style={styles.pendingBox}>
+              <Text style={styles.pendingLabel}>¿Es correcta esta ubicación?</Text>
+              <Text style={styles.pendingAddress} numberOfLines={2}>{pending.address}</Text>
+            </View>
+          )}
+          <TouchableOpacity
+            style={[
+              styles.primaryBtn,
+              step === 'selectDest' && { backgroundColor: colors.light.destructive },
+              !pending && styles.btnDisabled,
+            ]}
+            onPress={step === 'selectOrigin' ? confirmOrigin : confirmDest}
+            disabled={!pending}
+            activeOpacity={0.85}
+          >
+            <Feather name="check" size={18} color={colors.light.primaryForeground} />
+            <Text style={styles.primaryBtnText}>
+              {step === 'selectOrigin' ? 'Sí, es mi punto de partida' : 'Sí, es mi destino'}
             </Text>
-          </View>
-          <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: colors.light.destructive }]} onPress={confirmDest} activeOpacity={0.85}>
-            <Text style={styles.primaryBtnText}>Confirmar destino</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.secondaryBtn} onPress={() => setStep('selectOrigin')}>
-            <Text style={styles.secondaryBtnText}>← Cambiar origen</Text>
+          <TouchableOpacity
+            style={styles.secondaryBtn}
+            onPress={step === 'selectOrigin' ? resetSelection : () => { setStep('selectOrigin'); setPending(origin); setQuery(origin?.address ?? ''); setResults([]); }}
+          >
+            <Text style={styles.secondaryBtnText}>{step === 'selectOrigin' ? 'Cancelar' : '← Cambiar origen'}</Text>
           </TouchableOpacity>
         </View>
+        </KeyboardAvoidingView>
       )}
 
       {/* Bottom sheet — confirm */}
@@ -726,12 +831,6 @@ const styles = StyleSheet.create({
   brandLogo: { width: 140, height: 140 },
   brandName: { fontSize: 30, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
   brandTagline: { fontSize: 14, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
-  crosshairWrap: {
-    position: 'absolute', left: 0, right: 0, top: 0, bottom: 0,
-    alignItems: 'center', justifyContent: 'center',
-    pointerEvents: 'none',
-  },
-  crosshairShadow: { width: 14, height: 6, borderRadius: 7, marginTop: 2 },
   topLabel: {
     position: 'absolute', left: 16, right: 16,
     backgroundColor: colors.light.card + 'F4', borderRadius: colors.radius,
@@ -779,6 +878,11 @@ const styles = StyleSheet.create({
   },
   retryBtnText: { fontSize: 15, fontWeight: '700', color: colors.light.primaryForeground, fontFamily: 'Inter_700Bold' },
   // Bottom sheet
+  sheetKeyboardWrap: {
+    position: 'absolute', left: 0, right: 0, top: 0, bottom: 0,
+    justifyContent: 'flex-end',
+  },
+  sheetStatic: { position: 'relative', bottom: undefined, left: undefined, right: undefined },
   sheet: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     backgroundColor: colors.light.card + 'F8',
@@ -787,6 +891,34 @@ const styles = StyleSheet.create({
   },
   sheetTitle: { fontSize: 18, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold', marginBottom: 4 },
   addressRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  searchRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: colors.light.muted, borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: Platform.OS === 'web' ? 12 : 4,
+    marginBottom: 10,
+  },
+  searchInput: {
+    flex: 1, fontSize: 15, color: colors.light.foreground,
+    fontFamily: 'Inter_400Regular', paddingVertical: Platform.OS === 'web' ? 0 : 10,
+  },
+  resultsList: { maxHeight: 190, marginBottom: 8 },
+  resultRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingVertical: 11, paddingHorizontal: 4,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.light.border,
+  },
+  resultText: { flex: 1, fontSize: 14, color: colors.light.foreground, fontFamily: 'Inter_400Regular', lineHeight: 19 },
+  noResultsText: {
+    fontSize: 13, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular',
+    marginBottom: 10, lineHeight: 18,
+  },
+  pendingBox: {
+    backgroundColor: colors.light.muted, borderRadius: 12,
+    padding: 12, marginBottom: 12,
+  },
+  pendingLabel: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold', marginBottom: 4 },
+  pendingAddress: { fontSize: 14, color: colors.light.foreground, fontFamily: 'Inter_500Medium', lineHeight: 19 },
+  btnDisabled: { opacity: 0.45 },
   addressText: { flex: 1, fontSize: 15, color: colors.light.foreground, fontFamily: 'Inter_400Regular', lineHeight: 22 },
   routeSummary: { gap: 8 },
   routeRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
