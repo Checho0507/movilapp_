@@ -207,20 +207,24 @@ router.post("/", authenticate, async (req, res) => {
     originLat, originLng, originAddress,
     destinationLat, destinationLng, destinationAddress,
     vehicleType, paymentMethod, estimatedPrice,
+    destinationPending,
   } = req.body as {
     originLat: number; originLng: number; originAddress: string;
-    destinationLat?: number | null; destinationLng?: number | null; destinationAddress?: string | null;
+    destinationLat?: number; destinationLng?: number; destinationAddress?: string;
     vehicleType: string; paymentMethod: string; estimatedPrice?: number;
+    destinationPending?: boolean;
   };
 
   const normalizedOriginAddress = typeof originAddress === "string" ? originAddress.trim() : "";
   const normalizedDestinationAddress = typeof destinationAddress === "string" ? destinationAddress.trim() : "";
   const hasDestination =
-    destinationLat != null &&
-    destinationLng != null &&
+    typeof destinationLat === "number" &&
+    typeof destinationLng === "number" &&
     Number.isFinite(destinationLat) &&
     Number.isFinite(destinationLng) &&
     normalizedDestinationAddress.length > 0;
+
+  const tripDestinationPending = destinationPending === true || !hasDestination;
 
   const [trip] = await db.insert(tripsTable).values({
     passengerId: user.userId,
@@ -232,7 +236,7 @@ router.post("/", authenticate, async (req, res) => {
     destinationLat: hasDestination ? String(destinationLat) : null,
     destinationLng: hasDestination ? String(destinationLng) : null,
     destinationAddress: hasDestination ? normalizedDestinationAddress : null,
-    destinationPending: !hasDestination,
+    destinationPending: tripDestinationPending,
     vehicleType,
     paymentMethod,
     estimatedPrice: String(estimatedPrice ?? 0),

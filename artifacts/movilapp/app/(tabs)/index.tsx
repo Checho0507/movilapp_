@@ -377,24 +377,25 @@ function PassengerHome() {
       const normalizedDestinationAddress = typeof dest?.address === 'string' ? dest.address.trim() : '';
       const hasDestination = !!dest && Number.isFinite(dest.lat) && Number.isFinite(dest.lng) && normalizedDestinationAddress.length > 0;
 
-      const finalDestinationLat = hasDestination ? dest!.lat : null;
-      const finalDestinationLng = hasDestination ? dest!.lng : null;
-      const finalDestinationAddress = hasDestination ? normalizedDestinationAddress : null;
+      const tripPayload: Record<string, any> = {
+        originLat: origin.lat,
+        originLng: origin.lng,
+        originAddress: normalizedOriginAddress,
+        vehicleType: 'taxi',
+        paymentMethod,
+      };
 
-      const trip = await createTrip.mutateAsync({
-        data: {
-          originLat: origin.lat,
-          originLng: origin.lng,
-          originAddress: normalizedOriginAddress,
-          destinationLat: finalDestinationLat,
-          destinationLng: finalDestinationLng,
-          destinationAddress: finalDestinationAddress,
-          destinationPending: !hasDestination,
-          vehicleType: 'taxi',
-          paymentMethod,
-          estimatedPrice: hasDestination ? estimatedPrice : 0,
-        } as any,
-      });
+      if (hasDestination) {
+        tripPayload.destinationLat = dest!.lat;
+        tripPayload.destinationLng = dest!.lng;
+        tripPayload.destinationAddress = normalizedDestinationAddress;
+        tripPayload.estimatedPrice = estimatedPrice;
+      } else {
+        tripPayload.destinationPending = true;
+        tripPayload.estimatedPrice = 0;
+      }
+
+      const trip = await createTrip.mutateAsync({ data: tripPayload as any });
       setActiveTripId(trip.id);
       joinTrip(trip.id);
     } catch (err: any) {
