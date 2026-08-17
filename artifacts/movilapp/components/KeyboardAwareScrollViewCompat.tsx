@@ -16,8 +16,6 @@ type Props = KeyboardAwareScrollViewProps & ScrollViewProps & {
   maxExtraScroll?: number; // px to allow additional automatic scroll beyond base position
 };
 
-import { Platform, ScrollView, ScrollViewProps, Keyboard, NativeSyntheticEvent, NativeScrollEvent, StyleSheet } from 'react-native';
-
 export function KeyboardAwareScrollViewCompat({
   children,
   keyboardShouldPersistTaps = 'handled',
