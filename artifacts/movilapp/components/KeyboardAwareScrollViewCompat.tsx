@@ -14,6 +14,10 @@ import {
 
 type Props = KeyboardAwareScrollViewProps & ScrollViewProps & {
   maxExtraScroll?: number; // px to allow additional automatic scroll beyond base position
+  // Accept some extra keyboard-aware props commonly used across the app so TS doesn't complain
+  keyboardVerticalOffset?: number;
+  extraScrollHeight?: number;
+  enableOnAndroid?: boolean;
 };
 
 export function KeyboardAwareScrollViewCompat({

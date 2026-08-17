@@ -696,6 +696,55 @@ function PassengerHome() {
           </TouchableOpacity>
         </View>
       )}
+
+      {/* Bottom sheet — confirm (origin set, destination omitted) */}
+      {step === 'confirm' && origin && !dest && (
+        <View style={[styles.sheet, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
+          <View style={styles.routeSummary}>
+            <View style={styles.routeRow}>
+              <Feather name="circle" size={10} color={colors.light.primary} />
+              <Text style={styles.routeText} numberOfLines={2}>{origin.address}</Text>
+            </View>
+            <View style={[styles.routeConnector]} />
+            <View style={styles.routeRow}>
+              <Feather name="map-pin" size={10} color={colors.light.destructive} />
+              <Text style={styles.routeText} numberOfLines={1}>Destino por confirmar</Text>
+            </View>
+          </View>
+
+          {/* No price/distance when destination is missing */}
+
+          {/* Payment method selector (still allow choosing) */}
+          <View style={styles.paySection}>
+            <Text style={styles.payLabel}>¿Cómo vas a pagar?</Text>
+            <View style={styles.payRow}>
+              {PAYMENT_OPTIONS.map(opt => (
+                <TouchableOpacity
+                  key={opt.key}
+                  style={[styles.payChip, paymentMethod === opt.key && styles.payChipActive]}
+                  onPress={() => setPaymentMethod(opt.key)}
+                  activeOpacity={0.75}
+                >
+                  <Text style={styles.payChipIcon}>{opt.icon}</Text>
+                  <Text style={[styles.payChipText, paymentMethod === opt.key && styles.payChipTextActive]}>
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          <TouchableOpacity style={styles.primaryBtn} onPress={requestTaxi} disabled={createTrip.isPending} activeOpacity={0.85}>
+            {createTrip.isPending
+              ? <ActivityIndicator color={colors.light.primaryForeground} />
+              : <><Feather name="navigation" size={18} color={colors.light.primaryForeground} /><Text style={styles.primaryBtnText}>Solicitar taxi</Text></>
+            }
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.secondaryBtn} onPress={resetSelection}>
+            <Text style={styles.secondaryBtnText}>Cambiar ruta</Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </View>
   );
 }
