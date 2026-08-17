@@ -391,6 +391,9 @@ function PassengerHome() {
         tripPayload.destinationAddress = normalizedDestinationAddress;
         tripPayload.estimatedPrice = estimatedPrice;
       } else {
+        tripPayload.destinationLat = origin.lat;
+        tripPayload.destinationLng = origin.lng;
+        tripPayload.destinationAddress = normalizedOriginAddress;
         tripPayload.destinationPending = true;
         tripPayload.estimatedPrice = 0;
       }

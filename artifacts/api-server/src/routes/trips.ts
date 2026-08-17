@@ -225,6 +225,9 @@ router.post("/", authenticate, async (req, res) => {
     normalizedDestinationAddress.length > 0;
 
   const tripDestinationPending = destinationPending === true || !hasDestination;
+  const finalDestinationLat = hasDestination ? destinationLat : originLat;
+  const finalDestinationLng = hasDestination ? destinationLng : originLng;
+  const finalDestinationAddress = hasDestination ? normalizedDestinationAddress : (normalizedOriginAddress || "Ubicación de origen");
 
   const [trip] = await db.insert(tripsTable).values({
     passengerId: user.userId,
@@ -233,9 +236,9 @@ router.post("/", authenticate, async (req, res) => {
     originLat: String(originLat),
     originLng: String(originLng),
     originAddress: normalizedOriginAddress || "Ubicación de origen",
-    destinationLat: hasDestination ? String(destinationLat) : null,
-    destinationLng: hasDestination ? String(destinationLng) : null,
-    destinationAddress: hasDestination ? normalizedDestinationAddress : null,
+    destinationLat: String(finalDestinationLat),
+    destinationLng: String(finalDestinationLng),
+    destinationAddress: finalDestinationAddress,
     destinationPending: tripDestinationPending,
     vehicleType,
     paymentMethod,
