@@ -16,6 +16,8 @@ type Props = KeyboardAwareScrollViewProps & ScrollViewProps & {
   maxExtraScroll?: number; // px to allow additional automatic scroll beyond base position
 };
 
+import { Platform, ScrollView, ScrollViewProps, Keyboard, NativeSyntheticEvent, NativeScrollEvent, StyleSheet } from 'react-native';
+
 export function KeyboardAwareScrollViewCompat({
   children,
   keyboardShouldPersistTaps = 'handled',
@@ -77,6 +79,26 @@ export function KeyboardAwareScrollViewCompat({
     }, 120) as unknown) as number;
   }
 
+  // Ensure layout-only props that affect the content (justifyContent, alignItems, flexDirection,
+  // flexWrap, alignContent) are applied to contentContainerStyle rather than style. React Native
+  // warns/throws if these are placed on the child of a ScrollView.
+  const flattenedStyle = StyleSheet.flatten(props.style) || {};
+  const layoutKeys = ['justifyContent', 'alignItems', 'flexDirection', 'flexWrap', 'alignContent'];
+  const layoutStyle: any = {};
+  const restStyle: any = { ...flattenedStyle };
+  for (const k of layoutKeys) {
+    if (restStyle[k] !== undefined) {
+      layoutStyle[k] = restStyle[k];
+      delete restStyle[k];
+    }
+  }
+
+  const originalContentContainer = props.contentContainerStyle;
+  const mergedContentContainer = [
+    originalContentContainer,
+    Object.keys(layoutStyle).length ? layoutStyle : undefined,
+  ].filter(Boolean) as any;
+
   if (Platform.OS === 'web') {
     return (
       <ScrollView
@@ -86,6 +108,9 @@ export function KeyboardAwareScrollViewCompat({
         onContentSizeChange={onContentSizeChange}
         scrollEventThrottle={16}
         {...props}
+        // override to ensure layout props are applied to contentContainerStyle
+        style={restStyle}
+        contentContainerStyle={mergedContentContainer}
       >
         {children}
       </ScrollView>
@@ -104,6 +129,9 @@ export function KeyboardAwareScrollViewCompat({
       extraScrollHeight={20}
       enableOnAndroid
       {...props}
+      // ensure layout props are applied to contentContainerStyle instead of style
+      style={restStyle}
+      contentContainerStyle={mergedContentContainer}
     >
       {children}
     </KeyboardAwareScrollView>
