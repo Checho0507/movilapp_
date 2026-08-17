@@ -390,8 +390,11 @@ function PassengerHome() {
       setActiveTripId(trip.id);
       joinTrip(trip.id);
     } catch (err: any) {
+      // Log full error for diagnostics (will appear in adb logcat)
+      console.error('createTrip error:', err);
       setStep('confirm');
-      Alert.alert('Error', err?.data?.error ?? 'No se pudo solicitar el taxi.');
+      const msg = err?.data?.error ?? err?.message ?? (typeof err === 'string' ? err : 'No se pudo solicitar el taxi.');
+      Alert.alert('Error', msg);
     }
   };
 
