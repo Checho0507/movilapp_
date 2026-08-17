@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Platform, ScrollView, ScrollViewProps, Keyboard, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
+import React, { useEffect, useRef } from 'react';
+import { Platform, ScrollView, ScrollViewProps, Keyboard, NativeSyntheticEvent, NativeScrollEvent, StyleSheet } from 'react-native';
 import {
   KeyboardAwareScrollView,
   KeyboardAwareScrollViewProps,
