@@ -1,10 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
-  Platform, Alert, Animated, Vibration, TextInput, ScrollView, Keyboard,
+  Platform, Alert, Animated, Vibration, Image, TextInput, ScrollView, Keyboard,
   KeyboardAvoidingView,
 } from 'react-native';
-import { BrandLogo } from '@/components/BrandLogo';
 import { MapView, Marker, PROVIDER_DEFAULT } from '@/lib/maps';
 import type { Region } from '@/lib/maps';
 import * as Location from 'expo-location';
@@ -843,7 +842,11 @@ function DriverHome() {
   return (
     <View style={styles.root}>
       <View style={styles.brandWrap}>
-        <BrandLogo size={120} style={styles.brandLogo} />
+        <Image
+          source={require('@/assets/images/logo.png')}
+          style={styles.brandLogo}
+          resizeMode="contain"
+        />
         <Text style={styles.brandName}>MovilApp</Text>
         <Text style={styles.brandTagline}>Tu servicio de taxi confiable</Text>
       </View>
@@ -946,18 +949,10 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.light.background },
-  brandWrap: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    paddingHorizontal: 32,
-    paddingTop: 24,
-    paddingBottom: 12,
-  },
-  brandLogo: { width: 148, height: 148 },
-  brandName: { fontSize: 30, fontWeight: '800', color: '#F8FAFC', fontFamily: 'Inter_700Bold', letterSpacing: 0.3 },
-  brandTagline: { fontSize: 14, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', opacity: 0.9 },
+  brandWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 32 },
+  brandLogo: { width: 140, height: 140 },
+  brandName: { fontSize: 30, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  brandTagline: { fontSize: 14, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
   topLabel: {
     position: 'absolute', left: 16, right: 16,
     backgroundColor: colors.light.card + 'F4', borderRadius: colors.radius,

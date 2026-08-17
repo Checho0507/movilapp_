@@ -1,0 +1,83 @@
+# GitHub Actions workflow to run EAS builds for Android and iOS
+#
+# Required repository secrets (set these in Settings → Secrets → Actions):
+# - EXPO_TOKEN: CI token created with `npx eas-cli@latest token:create` or `eas token:create`
+# - ANDROID_KEYSTORE_BASE64 (optional): base64-encoded Android keystore (if not using EAS-managed keystores)
+# - ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD (if providing keystore)
+# - APPLE_APPLE_TEAM_ID/APPLE_KEY_P8/APPLE_KEY_ID (optional) or manage Apple credentials with EAS
+#
+# This workflow runs on push to main and can be triggered manually via workflow_dispatch.
+
+name: EAS Build (Android + iOS)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build (all platforms)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Enable Corepack and setup pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install EAS CLI
+        run: pnpm dlx eas-cli@latest --version || true
+
+      - name: Show basic info
+        run: |
+          echo "Repository: $GITHUB_REPOSITORY"
+          node -v
+          pnpm -v
+
+      - name: Login to EAS (CI)
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          # Verify token is available and show whoami
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "EXPO_TOKEN is not set. Set repository secret 'EXPO_TOKEN' before running this workflow." >&2
+            exit 1
+          fi
+          npx eas-cli@latest whoami || npx eas-cli@latest login --token "$EXPO_TOKEN"
+
+      - name: Decode Android keystore (optional)
+        if: secrets.ANDROID_KEYSTORE_BASE64 != ''
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android-upload-key.keystore
+          ls -lah android-upload-key.keystore || true
+
+      - name: Run EAS build for all platforms (non-interactive)
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          # Use --non-interactive to prevent prompts in CI
+          npx eas-cli@latest build --platform all --non-interactive
+
+      - name: Upload build artifacts (if produced)
+        if: always()
+        run: |
+          echo "If EAS created artifact URLs they will be shown in the build log."
+
+# Notes:
+# - For Apple builds you typically need App Store Connect API key or to follow the EAS prompts to configure credentials.
+# - For production releases you should either let EAS manage credentials or securely store keystore/API key files as encrypted secrets.
+# - Consider adding steps to 'eas submit' for automatic store submission, or to store artifact URLs as workflow outputs.
