@@ -23,7 +23,7 @@ const STATUS_COLORS: Record<string, string> = {
   accepted: '#3B82F6',
   driver_arriving: '#6366F1',
   in_progress: '#10B981',
-  completed: '#00D48B',
+  completed: colors.light.primary,
   cancelled: '#FF4757',
 };
 
@@ -49,7 +49,7 @@ function TripCard({ item }: { item: any }) {
       <View style={styles.routeLine} />
       <View style={styles.routeRow}>
         <Feather name="map-pin" size={12} color={colors.light.destructive} />
-        <Text style={styles.addressText} numberOfLines={1}>{item.destinationAddress}</Text>
+        <Text style={styles.addressText} numberOfLines={1}>{item.destinationAddress ?? 'No especificado'}</Text>
       </View>
       <View style={styles.cardFooter}>
         <Text style={styles.metaText}>

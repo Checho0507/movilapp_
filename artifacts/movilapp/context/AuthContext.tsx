@@ -3,6 +3,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { useQueryClient } from '@tanstack/react-query';
 
+type DigitalPayment = 'nequi' | 'daviplata' | 'breve';
+
 export interface AuthUser {
   id: number;
   name: string;
@@ -13,6 +15,7 @@ export interface AuthUser {
   isOnline: boolean;
   rating: number;
   ratingCount: number;
+  acceptedPayments?: DigitalPayment[];
   createdAt: string;
 }
 

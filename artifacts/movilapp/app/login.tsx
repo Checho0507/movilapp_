@@ -10,6 +10,7 @@ import {
   Platform,
   Alert,
   Image,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLoginUser, useRegisterUser } from '@workspace/api-client-react';
@@ -37,6 +38,7 @@ export default function LoginScreen() {
   const [role, setRole] = useState<Role>('passenger');
   const [showPass, setShowPass] = useState(false);
   const [acceptedPayments, setAcceptedPayments] = useState<DigitalPayment[]>([]);
+  const [formError, setFormError] = useState('');
 
   const loginMutation = useLoginUser();
   const registerMutation = useRegisterUser();
@@ -50,21 +52,35 @@ export default function LoginScreen() {
   };
 
   const handleSubmit = async () => {
-    if (!phone.trim() || !password.trim()) {
-      Alert.alert('Error', 'Por favor ingresa tu número y contraseña.');
+    const trimmedPhone = phone.trim();
+    const trimmedName = name.trim();
+    const cleanedPhone = trimmedPhone.replace(/\D/g, '');
+
+    if (!trimmedPhone || !password.trim()) {
+      setFormError('Ingresa tu número y contraseña para continuar.');
       return;
     }
-    if (isRegister && !name.trim()) {
-      Alert.alert('Error', 'Por favor ingresa tu nombre.');
+    if (cleanedPhone.length < 7 || cleanedPhone.length > 15) {
+      setFormError('El número de celular no parece válido.');
       return;
     }
+    if (isRegister && !trimmedName) {
+      setFormError('Escribe tu nombre completo antes de continuar.');
+      return;
+    }
+    if (password.length < 6) {
+      setFormError('La contraseña debe tener al menos 6 caracteres.');
+      return;
+    }
+    setFormError('');
+
     try {
       let result: { token: string; user: any };
       if (isRegister) {
         result = await registerMutation.mutateAsync({
           data: {
-            name: name.trim(),
-            phone: phone.trim(),
+            name: trimmedName,
+            phone: cleanedPhone,
             password,
             role,
             ...(role === 'driver' ? { acceptedPayments } : {}),
@@ -72,26 +88,33 @@ export default function LoginScreen() {
         });
       } else {
         result = await loginMutation.mutateAsync({
-          data: { phone: phone.trim(), password },
+          data: { phone: cleanedPhone, password },
         });
       }
       await login(result.token, result.user);
       router.replace('/(tabs)');
     } catch (err: any) {
       const msg = err?.data?.error ?? err?.message ?? 'Error al iniciar sesión';
+      setFormError(msg);
       Alert.alert('Error', msg);
     }
   };
 
   return (
-    <ScrollView
+    <KeyboardAvoidingView
       style={styles.root}
-      contentContainerStyle={[styles.container, {
-        paddingTop: insets.top + (Platform.OS === 'web' ? 67 : 32),
-        paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 24),
-      }]}
-      keyboardShouldPersistTaps="handled"
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={insets.top + (Platform.OS === 'web' ? 67 : 60)}
     >
+      <ScrollView
+        contentContainerStyle={[styles.container, {
+          paddingTop: insets.top + (Platform.OS === 'web' ? 67 : 32),
+          paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 24),
+          flexGrow: 1,
+        }]}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
+      >
       {/* Logo */}
       <View style={styles.logoArea}>
         <View style={styles.logoSquare}>
@@ -104,6 +127,21 @@ export default function LoginScreen() {
         <Text style={styles.appName}>MovilApp</Text>
         <Text style={styles.tagline}>Tu movilidad, a un toque</Text>
       </View>
+
+      <View style={styles.heroCard}>
+        <View style={styles.heroBadge}>
+          <Feather name="shield" size={12} color={colors.light.primary} />
+          <Text style={styles.heroBadgeText}>Servicio seguro</Text>
+        </View>
+        <Text style={styles.heroTitle}>{isRegister ? 'Crea tu cuenta para empezar' : 'Ingresa para continuar'}</Text>
+      </View>
+
+      {formError ? (
+        <View style={styles.errorBanner}>
+          <Feather name="alert-circle" size={15} color={colors.light.destructive} />
+          <Text style={styles.errorText}>{formError}</Text>
+        </View>
+      ) : null}
 
       {/* Toggle */}
       <View style={styles.toggle}>
@@ -129,7 +167,7 @@ export default function LoginScreen() {
             <TextInput
               style={styles.input}
               value={name}
-              onChangeText={setName}
+              onChangeText={(text) => { setName(text); if (formError) setFormError(''); }}
               placeholder="Juan Pérez"
               placeholderTextColor={colors.light.mutedForeground}
               autoCapitalize="words"
@@ -142,7 +180,7 @@ export default function LoginScreen() {
           <TextInput
             style={styles.input}
             value={phone}
-            onChangeText={setPhone}
+            onChangeText={(text) => { setPhone(text); if (formError) setFormError(''); }}
             placeholder="300 000 0000"
             placeholderTextColor={colors.light.mutedForeground}
             keyboardType="phone-pad"
@@ -156,7 +194,7 @@ export default function LoginScreen() {
             <TextInput
               style={[styles.input, { flex: 1 }]}
               value={password}
-              onChangeText={setPassword}
+              onChangeText={(text) => { setPassword(text); if (formError) setFormError(''); }}
               placeholder="••••••••"
               placeholderTextColor={colors.light.mutedForeground}
               secureTextEntry={!showPass}
@@ -237,13 +275,17 @@ export default function LoginScreen() {
           {isLoading ? (
             <ActivityIndicator color={colors.light.primaryForeground} />
           ) : (
-            <Text style={styles.submitText}>
-              {isRegister ? 'Crear cuenta' : 'Ingresar'}
-            </Text>
+            <>
+              <Feather name={isRegister ? 'user-plus' : 'arrow-right'} size={18} color={colors.light.primaryForeground} />
+              <Text style={styles.submitText}>
+                {isRegister ? 'Crear cuenta' : 'Continuar'}
+              </Text>
+            </>
           )}
         </TouchableOpacity>
       </View>
     </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -259,6 +301,23 @@ const styles = StyleSheet.create({
   logoImage: { width: 90, height: 90 },
   appName: { fontSize: 28, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
   tagline: { fontSize: 14, color: colors.light.mutedForeground, marginTop: 4, fontFamily: 'Inter_400Regular' },
+  heroCard: {
+    backgroundColor: colors.light.card, borderRadius: colors.radius, borderWidth: 1, borderColor: colors.light.border,
+    paddingHorizontal: 16, paddingVertical: 14, marginBottom: 16,
+  },
+  heroBadge: {
+    flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: 6,
+    backgroundColor: colors.light.primary + '1A', borderRadius: 999,
+    paddingHorizontal: 10, paddingVertical: 6, marginBottom: 8,
+  },
+  heroBadgeText: { fontSize: 12, color: colors.light.primary, fontFamily: 'Inter_600SemiBold' },
+  heroTitle: { fontSize: 18, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  errorBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: colors.light.destructive + '14', borderWidth: 1, borderColor: colors.light.destructive + '40',
+    borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, marginBottom: 16,
+  },
+  errorText: { flex: 1, fontSize: 13, color: colors.light.destructive, fontFamily: 'Inter_500Medium' },
   toggle: {
     flexDirection: 'row', backgroundColor: colors.light.secondary,
     borderRadius: colors.radius, padding: 4, marginBottom: 32,
@@ -305,8 +364,9 @@ const styles = StyleSheet.create({
   paymentLabel: { fontSize: 14, fontWeight: '600', color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold' },
   paymentLabelActive: { fontSize: 14, fontWeight: '600', color: colors.light.primaryForeground, fontFamily: 'Inter_600SemiBold' },
   submitBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     backgroundColor: colors.light.primary, borderRadius: colors.radius,
-    paddingVertical: 16, alignItems: 'center', marginTop: 8,
+    paddingVertical: 16, marginTop: 8,
   },
   submitBtnDisabled: { opacity: 0.6 },
   submitText: { fontSize: 16, fontWeight: '700', color: colors.light.primaryForeground, fontFamily: 'Inter_700Bold' },
