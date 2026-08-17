@@ -214,7 +214,12 @@ router.post("/", authenticate, async (req, res) => {
   };
 
   const [trip] = await db.insert(tripsTable).values({
+    // Provide driverId explicitly (nullable) and set status early to ensure
+    // parameter ordering matches the table definition and prevents type-mismatch
+    // when optional fields (destination*) are omitted.
     passengerId: user.userId,
+    driverId: null,
+    status: "pending",
     originLat: String(originLat),
     originLng: String(originLng),
     originAddress,
@@ -225,7 +230,6 @@ router.post("/", authenticate, async (req, res) => {
     vehicleType,
     paymentMethod,
     estimatedPrice: String(estimatedPrice ?? 0),
-    status: "pending",
   }).returning();
 
   const enriched = await enrichTrip(trip);
