@@ -393,7 +393,7 @@ function PassengerHome() {
     if (activeTripId) {
       try {
         const token = await AsyncStorage.getItem('auth_token');
-        const base = `https://${process.env.EXPO_PUBLIC_DOMAIN}/api`;
+        const base = (process.env.EXPO_PUBLIC_API_BASE_URL ?? `https://${process.env.EXPO_PUBLIC_DOMAIN}`).replace(/\/api\/?$/i, '').replace(/\/$/, '') + '/api';
         await fetch(`${base}/trips/${activeTripId}/status`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -815,7 +815,7 @@ function DriverHome() {
             Vibration.vibrate([0, 200, 100, 200, 100, 400]);
             try {
               const token = await AsyncStorage.getItem('auth_token');
-              const base = `https://${process.env.EXPO_PUBLIC_DOMAIN}/api`;
+              const base = (process.env.EXPO_PUBLIC_API_BASE_URL ?? `https://${process.env.EXPO_PUBLIC_DOMAIN}`).replace(/\/api\/?$/i, '').replace(/\/$/, '') + '/api';
               const res = await fetch(`${base}/drivers/panic`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },

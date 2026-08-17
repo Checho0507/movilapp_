@@ -20,7 +20,10 @@ import { SocketProvider } from '@/context/SocketContext';
 import { TripProvider } from '@/context/TripContext';
 
 // Configure API base URL and auth once at module load
-setBaseUrl(`https://${process.env.EXPO_PUBLIC_DOMAIN}`);
+let API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? `https://${process.env.EXPO_PUBLIC_DOMAIN}`;
+// Normalize: remove any trailing slash and strip a trailing '/api' if present so generated client paths don't duplicate (e.g. /api + /api/auth)
+API_BASE_URL = API_BASE_URL.replace(/\/api\/?$/i, '').replace(/\/$/, '');
+setBaseUrl(API_BASE_URL);
 setAuthTokenGetter(() => AsyncStorage.getItem('auth_token'));
 
 SplashScreen.preventAutoHideAsync();
