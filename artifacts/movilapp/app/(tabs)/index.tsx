@@ -691,7 +691,15 @@ function PassengerHome() {
               : <><Feather name="navigation" size={18} color={colors.light.primaryForeground} /><Text style={styles.primaryBtnText}>Solicitar taxi</Text></>
             }
           </TouchableOpacity>
-          <TouchableOpacity style={styles.secondaryBtn} onPress={resetSelection}>
+          <TouchableOpacity
+            style={styles.secondaryBtn}
+            onPress={() => {
+              // go back to destination selection so user can change destination
+              setStep('selectDest');
+              setPending(dest);
+              setQuery(dest?.address ?? '');
+            }}
+          >
             <Text style={styles.secondaryBtnText}>Cambiar ruta</Text>
           </TouchableOpacity>
         </View>
@@ -740,7 +748,15 @@ function PassengerHome() {
               : <><Feather name="navigation" size={18} color={colors.light.primaryForeground} /><Text style={styles.primaryBtnText}>Solicitar taxi</Text></>
             }
           </TouchableOpacity>
-          <TouchableOpacity style={styles.secondaryBtn} onPress={resetSelection}>
+          <TouchableOpacity
+            style={styles.secondaryBtn}
+            onPress={() => {
+              // go back to destination selection when destination was omitted
+              setStep('selectDest');
+              setPending(null);
+              setQuery('');
+            }}
+          >
             <Text style={styles.secondaryBtnText}>Cambiar ruta</Text>
           </TouchableOpacity>
         </View>
