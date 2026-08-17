@@ -10,7 +10,9 @@ import colors from '@/constants/colors';
 import { Feather } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL ?? `https://${process.env.EXPO_PUBLIC_DOMAIN}`).replace(/\/api\/?$/i, '').replace(/\/$/, '') + '/api';
+import { getApiUrl } from '@/lib/api-config';
+
+const BASE_URL = getApiUrl();
 
 type DigitalPayment = 'nequi' | 'daviplata' | 'breve';
 

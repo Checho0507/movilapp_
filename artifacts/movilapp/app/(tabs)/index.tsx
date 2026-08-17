@@ -15,6 +15,8 @@ import { useCreateTrip, useUpdateDriverStatus, useUpdateDriverLocation, useUpdat
 import { useAuth } from '@/context/AuthContext';
 import { useSocket } from '@/context/SocketContext';
 import colors from '@/constants/colors';
+import { getApiUrl } from '@/lib/api-config';
+import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 
 const BOGOTA: Region = { latitude: 4.711, longitude: -74.0721, latitudeDelta: 0.06, longitudeDelta: 0.06 };
 const DRIVER_ACCEPT_RADIUS_KM = 1;
@@ -395,7 +397,7 @@ function PassengerHome() {
     if (activeTripId) {
       try {
         const token = await AsyncStorage.getItem('auth_token');
-        const base = (process.env.EXPO_PUBLIC_API_BASE_URL ?? `https://${process.env.EXPO_PUBLIC_DOMAIN}`).replace(/\/api\/?$/i, '').replace(/\/$/, '') + '/api';
+        const base = getApiUrl();
         await fetch(`${base}/trips/${activeTripId}/status`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -542,10 +544,11 @@ function PassengerHome() {
 
       {/* Bottom sheet — address search (origin / destination) */}
       {isSelectingMode && (
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        <KeyboardAwareScrollViewCompat
+          maxExtraScroll={220}
           keyboardVerticalOffset={insets.top + (Platform.OS === 'web' ? 67 : 60)}
           style={styles.sheetKeyboardWrap}
+          contentContainerStyle={[{ flexGrow: 1 }]} 
           pointerEvents="box-none"
         >
         <View style={[styles.sheet, styles.sheetStatic, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
@@ -635,7 +638,7 @@ function PassengerHome() {
             </TouchableOpacity>
           )}
         </View>
-        </KeyboardAvoidingView>
+        </KeyboardAwareScrollViewCompat>
       )}
 
       {/* Bottom sheet — confirm */}
@@ -857,7 +860,7 @@ function DriverHome() {
             Vibration.vibrate([0, 200, 100, 200, 100, 400]);
             try {
               const token = await AsyncStorage.getItem('auth_token');
-              const base = (process.env.EXPO_PUBLIC_API_BASE_URL ?? `https://${process.env.EXPO_PUBLIC_DOMAIN}`).replace(/\/api\/?$/i, '').replace(/\/$/, '') + '/api';
+              const base = getApiUrl();
               const res = await fetch(`${base}/drivers/panic`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },

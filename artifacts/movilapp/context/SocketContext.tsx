@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
+import { getApiBaseUrl } from '@/lib/api-config';
 import { useAuth } from './AuthContext';
 
 interface SocketContextType {
@@ -24,8 +25,9 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!token || !user) return;
-    const domain = process.env.EXPO_PUBLIC_DOMAIN;
-    const s = io(`https://${domain}`, {
+
+    const socketBaseUrl = getApiBaseUrl();
+    const s = io(socketBaseUrl, {
       path: '/api/socket.io',
       auth: { token },
       transports: ['websocket'],

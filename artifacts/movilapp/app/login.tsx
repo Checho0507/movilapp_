@@ -5,13 +5,12 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  ScrollView,
   ActivityIndicator,
   Platform,
   Alert,
   Image,
-  KeyboardAvoidingView,
 } from 'react-native';
+import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLoginUser, useRegisterUser } from '@workspace/api-client-react';
 import { useAuth } from '@/context/AuthContext';
@@ -101,20 +100,18 @@ export default function LoginScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
+    <KeyboardAwareScrollViewCompat
       style={styles.root}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      contentContainerStyle={[styles.container, {
+        paddingTop: insets.top + (Platform.OS === 'web' ? 67 : 32),
+        paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 24),
+        flexGrow: 1,
+      }]}
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="interactive"
       keyboardVerticalOffset={insets.top + (Platform.OS === 'web' ? 67 : 60)}
+      maxExtraScroll={200}
     >
-      <ScrollView
-        contentContainerStyle={[styles.container, {
-          paddingTop: insets.top + (Platform.OS === 'web' ? 67 : 32),
-          paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 24),
-          flexGrow: 1,
-        }]}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="interactive"
-      >
       {/* Logo */}
       <View style={styles.logoArea}>
         <View style={styles.logoSquare}>
@@ -284,8 +281,7 @@ export default function LoginScreen() {
           )}
         </TouchableOpacity>
       </View>
-    </ScrollView>
-    </KeyboardAvoidingView>
+    </KeyboardAwareScrollViewCompat>
   );
 }
 

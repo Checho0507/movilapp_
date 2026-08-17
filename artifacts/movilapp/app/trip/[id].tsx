@@ -17,7 +17,9 @@ import { useAuth } from '@/context/AuthContext';
 import { useSocket } from '@/context/SocketContext';
 import colors from '@/constants/colors';
 
-const BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL ?? `https://${process.env.EXPO_PUBLIC_DOMAIN}`).replace(/\/api\/?$/i, '').replace(/\/$/, '') + '/api';
+import { getApiUrl } from '@/lib/api-config';
+
+const BASE_URL = getApiUrl();
 
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Buscando conductor...',
