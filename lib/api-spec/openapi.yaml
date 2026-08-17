@@ -677,7 +677,7 @@ components:
     # ─── TRIP ─────────────────────────────────────────────────────────────────
     Trip:
       type: object
-      required: [id, passengerId, status, originLat, originLng, originAddress, destinationLat, destinationLng, destinationAddress, vehicleType, estimatedPrice, paymentMethod, createdAt]
+      required: [id, passengerId, status, originLat, originLng, originAddress, vehicleType, estimatedPrice, paymentMethod, createdAt]
       properties:
         id:
           type: integer
@@ -741,7 +741,16 @@ components:
 
     TripInput:
       type: object
-      required: [originLat, originLng, originAddress, destinationLat, destinationLng, destinationAddress, vehicleType, paymentMethod]
+      required: [originLat, originLng, originAddress, vehicleType, paymentMethod]
+      properties:
+        destinationLat:
+          type: ["number","null"]
+        destinationLng:
+          type: ["number","null"]
+        destinationAddress:
+          type: ["string","null"]
+        destinationPending:
+          type: boolean
       properties:
         originLat:
           type: number

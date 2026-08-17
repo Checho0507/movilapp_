@@ -31,7 +31,7 @@ const STATUS_LABELS: Record<string, string> = {
 const STATUS_COLORS: Record<string, string> = {
   pending: '#FFB800', accepted: '#3B82F6',
   driver_arriving: '#6366F1', in_progress: '#10B981',
-  completed: '#00D48B', cancelled: '#FF4757',
+  completed: colors.light.primary, cancelled: '#FF4757',
 };
 
 // Generates 3 codes: correct + 2 random distractors, shuffled
@@ -71,7 +71,7 @@ export default function TripScreen() {
   const { socket, joinTrip, leaveTrip } = useSocket();
   const isDriver = user?.role === 'driver';
 
-  const mapRef = useRef<MapView>(null);
+  const mapRef = useRef<React.ElementRef<typeof MapView>>(null);
   const flatRef = useRef<FlatList>(null);
 
   // Server data — hooks take id:number directly (not an object)
@@ -158,7 +158,8 @@ export default function TripScreen() {
   // Fetch OSRM route whenever trip loads or status changes
   useEffect(() => {
     if (!trip) return;
-    if (trip.status === 'in_progress') {
+    const hasDestination = trip.destinationLat != null && trip.destinationLng != null;
+    if (trip.status === 'in_progress' && hasDestination) {
       // Trip active: full route origin → destination
       fetchOSRMRoute(
         Number(trip.originLat), Number(trip.originLng),
@@ -306,12 +307,20 @@ export default function TripScreen() {
   const driverLat = trip.driver?.currentLat ?? trip.originLat;
   const driverLng = trip.driver?.currentLng ?? trip.originLng;
 
-  const mapRegion = {
-    latitude: (trip.originLat + trip.destinationLat) / 2,
-    longitude: (trip.originLng + trip.destinationLng) / 2,
-    latitudeDelta: Math.abs(trip.originLat - trip.destinationLat) * 2.8 + 0.04,
-    longitudeDelta: Math.abs(trip.originLng - trip.destinationLng) * 2.8 + 0.04,
-  };
+  const hasDestination = trip.destinationLat != null && trip.destinationLng != null;
+  const mapRegion = hasDestination
+    ? {
+      latitude: (trip.originLat + trip.destinationLat) / 2,
+      longitude: (trip.originLng + trip.destinationLng) / 2,
+      latitudeDelta: Math.abs(trip.originLat - trip.destinationLat) * 2.8 + 0.04,
+      longitudeDelta: Math.abs(trip.originLng - trip.destinationLng) * 2.8 + 0.04,
+    }
+    : {
+      latitude: trip.originLat,
+      longitude: trip.originLng,
+      latitudeDelta: 0.02,
+      longitudeDelta: 0.02,
+    };
 
   const isDone = trip.status === 'completed' || trip.status === 'cancelled';
 
@@ -354,8 +363,8 @@ export default function TripScreen() {
         {routeCoords.length > 1 && (
           <Polyline coordinates={routeCoords} strokeColor={colors.light.primary} strokeWidth={4} />
         )}
-        {/* Straight line when pending/accepted */}
-        {routeCoords.length === 0 && (
+        {/* Straight line when pending/accepted (only if destination present) */}
+        {routeCoords.length === 0 && hasDestination && (
           <Polyline
             coordinates={[
               { latitude: trip.originLat, longitude: trip.originLng },
@@ -400,7 +409,8 @@ export default function TripScreen() {
 
       {/* Bottom panel */}
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={insets.top + (Platform.OS === 'web' ? 67 : 60)}
         style={[styles.panel, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 16) }]}
       >
         {showChat ? (
@@ -457,7 +467,7 @@ export default function TripScreen() {
               </View>
               <View style={styles.routeBlock}>
                 <View style={styles.routeRow}><Feather name="circle" size={9} color={colors.light.primary} /><Text style={styles.routeText} numberOfLines={1}>{trip.originAddress}</Text></View>
-                <View style={styles.routeRow}><Feather name="map-pin" size={9} color={colors.light.destructive} /><Text style={styles.routeText} numberOfLines={1}>{trip.destinationAddress}</Text></View>
+                <View style={styles.routeRow}><Feather name="map-pin" size={9} color={colors.light.destructive} /><Text style={styles.routeText} numberOfLines={1}>{trip.destinationAddress ?? 'No especificado'}</Text></View>
               </View>
 
               {/* Passenger code (for passenger, shown while driver hasn't started trip) */}

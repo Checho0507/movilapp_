@@ -17,7 +17,7 @@ export function BrandLogo({
   if (hasError) {
     return (
       <LinearGradient
-        colors={[colors.light.primary, '#3B82F6']}
+        colors={[colors.light.primary, '#F59E0B']}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={[
@@ -37,7 +37,7 @@ export function BrandLogo({
 
   return (
     <LinearGradient
-      colors={['rgba(0,212,139,0.18)', 'rgba(59,130,246,0.12)']}
+      colors={['rgba(255,184,0,0.18)', 'rgba(245,158,11,0.12)']}
       start={{ x: 0, y: 0 }}
       end={{ x: 1, y: 1 }}
       style={[

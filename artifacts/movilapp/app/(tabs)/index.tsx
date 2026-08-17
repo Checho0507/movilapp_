@@ -20,10 +20,8 @@ const BOGOTA: Region = { latitude: 4.711, longitude: -74.0721, latitudeDelta: 0.
 const DRIVER_ACCEPT_RADIUS_KM = 1;
 
 const PAYMENT_OPTIONS = [
-  { key: 'cash',      label: 'Efectivo', icon: '💵' },
-  { key: 'nequi',     label: 'Nequi',    icon: '💜' },
-  { key: 'daviplata', label: 'Daviplata',icon: '🔴' },
-  { key: 'breve',     label: 'Breve',    icon: '🟡' },
+  { key: 'cash', label: 'Efectivo', icon: '💵' },
+  { key: 'card', label: 'Tarjeta', icon: '💳' },
 ] as const;
 
 type PaymentKey = typeof PAYMENT_OPTIONS[number]['key'];
@@ -205,7 +203,7 @@ function PassengerHome() {
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const { socket, joinTrip, leaveTrip } = useSocket();
-  const mapRef = useRef<MapView>(null);
+  const mapRef = useRef<React.ElementRef<typeof MapView>>(null);
   const geocodeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
@@ -329,27 +327,15 @@ function PassengerHome() {
     };
   }, [step, activeTripId, socket]);
 
-  const startSelectOrigin = async () => {
-    const session = ++selectSessionId.current;
+  const startSelectOrigin = () => {
+    // Enter origin selection mode and require the user to type the address.
+    // Do NOT auto-fill with GPS — the app still uses userLoc / userCity (from initial permissions)
+    // to scope searches but the input must be provided by the user.
+    selectSessionId.current += 1;
     setQuery('');
     setResults([]);
     setPending(null);
     setStep('selectOrigin');
-    // Suggest current GPS location as the starting point
-    try {
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      if (session !== selectSessionId.current) return;
-      const { latitude: lat, longitude: lng } = pos.coords;
-      setUserLoc({ lat, lng });
-      const reg: Region = { latitude: lat, longitude: lng, latitudeDelta: 0.008, longitudeDelta: 0.008 };
-      setRegion(reg);
-      mapRef.current?.animateToRegion(reg, 500);
-      const { address: addr, city } = await reverseGeocodeFull(lat, lng);
-      if (session !== selectSessionId.current) return;
-      if (city) setUserCity(city);
-      setPending({ lat, lng, address: addr });
-      setQuery(addr);
-    } catch { /* user will type the address */ }
   };
 
   const confirmOrigin = () => {
@@ -370,16 +356,32 @@ function PassengerHome() {
     setStep('confirm');
   };
 
+  const skipDestination = () => {
+    // User chose to omit destination: proceed to confirm step without a dest.
+    setDest(null);
+    setPending(null);
+    setQuery('');
+    setResults([]);
+    setStep('confirm');
+  };
+
   const requestTaxi = async () => {
-    if (!origin || !dest) return;
+    if (!origin) return;
     setStep('searching');
     try {
+      // If destination is omitted, use origin coords as a placeholder and mark address as "Destino por confirmar"
+      // If destination was omitted, send nulls for destination coordinates/address
+      const finalDestinationLat = dest?.lat ?? null;
+      const finalDestinationLng = dest?.lng ?? null;
+      const finalDestinationAddress = dest?.address ?? null;
+
       const trip = await createTrip.mutateAsync({
         data: {
           originLat: origin.lat, originLng: origin.lng, originAddress: origin.address,
-          destinationLat: dest.lat, destinationLng: dest.lng, destinationAddress: dest.address,
+          destinationLat: finalDestinationLat, destinationLng: finalDestinationLng, destinationAddress: finalDestinationAddress,
+          destinationPending: dest ? false : true,
           vehicleType: 'taxi', paymentMethod,
-        },
+        } as any,
       });
       setActiveTripId(trip.id);
       joinTrip(trip.id);
@@ -503,6 +505,34 @@ function PassengerHome() {
       {step === 'idle' && (
         <View style={[styles.sheet, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
           <Text style={styles.sheetTitle}>Hola, {user?.name?.split(' ')[0]} 👋</Text>
+
+          <View style={styles.summaryCard}>
+            <View style={styles.summaryHeader}>
+              <View>
+                <Text style={styles.summaryLabel}>Servicio activo</Text>
+                <Text style={styles.summaryTitle}>Tu viaje empieza aquí</Text>
+              </View>
+              <View style={styles.summaryBadge}>
+                <Text style={styles.summaryBadgeText}>24/7</Text>
+              </View>
+            </View>
+
+            <View style={styles.summaryRow}>
+              <View style={styles.summaryItem}>
+                <Feather name="clock" size={14} color={colors.light.primary} />
+                <Text style={styles.summaryItemText}>Rápido</Text>
+              </View>
+              <View style={styles.summaryItem}>
+                <Feather name="shield" size={14} color={colors.light.primary} />
+                <Text style={styles.summaryItemText}>Seguro</Text>
+              </View>
+              <View style={styles.summaryItem}>
+                <Feather name="credit-card" size={14} color={colors.light.primary} />
+                <Text style={styles.summaryItemText}>Paga fácil</Text>
+              </View>
+            </View>
+          </View>
+
           <TouchableOpacity style={styles.primaryBtn} onPress={startSelectOrigin} activeOpacity={0.85}>
             <Feather name="navigation" size={18} color={colors.light.primaryForeground} />
             <Text style={styles.primaryBtnText}>Pedir taxi</Text>
@@ -513,7 +543,8 @@ function PassengerHome() {
       {/* Bottom sheet — address search (origin / destination) */}
       {isSelectingMode && (
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={insets.top + (Platform.OS === 'web' ? 67 : 60)}
           style={styles.sheetKeyboardWrap}
           pointerEvents="box-none"
         >
@@ -592,6 +623,17 @@ function PassengerHome() {
           >
             <Text style={styles.secondaryBtnText}>{step === 'selectOrigin' ? 'Cancelar' : '← Cambiar origen'}</Text>
           </TouchableOpacity>
+
+          {/* Allow skipping destination when selecting destination */}
+          {step === 'selectDest' && (
+            <TouchableOpacity
+              style={[styles.skipBtn, { marginTop: 8 }]}
+              onPress={skipDestination}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.skipBtnText}>Omitir destino (lo diré después)</Text>
+            </TouchableOpacity>
+          )}
         </View>
         </KeyboardAvoidingView>
       )}
@@ -1012,7 +1054,29 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20, paddingTop: 18, gap: 12,
   },
   sheetTitle: { fontSize: 18, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold', marginBottom: 4 },
+  summaryCard: {
+    backgroundColor: colors.light.secondary, borderRadius: colors.radius, borderWidth: 1, borderColor: colors.light.border,
+    padding: 14, gap: 12,
+  },
+  summaryHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  summaryLabel: { fontSize: 11, color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold', letterSpacing: 0.5, textTransform: 'uppercase' },
+  summaryTitle: { fontSize: 16, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold', marginTop: 2 },
+  summaryBadge: {
+    backgroundColor: colors.light.primary + '20', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 4,
+    borderWidth: 1, borderColor: colors.light.primary + '40',
+  },
+  summaryBadgeText: { fontSize: 11, color: colors.light.primary, fontFamily: 'Inter_700Bold' },
+  summaryRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
+  summaryItem: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    backgroundColor: colors.light.card, borderRadius: 10, paddingVertical: 9, borderWidth: 1, borderColor: colors.light.border,
+  },
+  summaryItemText: { fontSize: 12, color: colors.light.foreground, fontFamily: 'Inter_600SemiBold' },
   addressRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  skipBtn: {
+    backgroundColor: colors.light.primary, borderRadius: colors.radius, paddingVertical: 12,
+    alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.light.primary + '60',
+  },
+  skipBtnText: { color: colors.light.primaryForeground, fontWeight: '700', fontSize: 14 },
   searchRow: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     backgroundColor: colors.light.muted, borderRadius: 12,

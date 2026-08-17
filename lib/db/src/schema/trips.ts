@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, numeric } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, numeric, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -10,9 +10,10 @@ export const tripsTable = pgTable("trips", {
   originLat: numeric("origin_lat").notNull(),
   originLng: numeric("origin_lng").notNull(),
   originAddress: text("origin_address").notNull(),
-  destinationLat: numeric("destination_lat").notNull(),
-  destinationLng: numeric("destination_lng").notNull(),
-  destinationAddress: text("destination_address").notNull(),
+  destinationLat: numeric("destination_lat"),
+  destinationLng: numeric("destination_lng"),
+  destinationAddress: text("destination_address"),
+  destinationPending: boolean("destination_pending").notNull().default(false),
   vehicleType: text("vehicle_type").notNull().default("taxi"),
   estimatedPrice: numeric("estimated_price").notNull().default("0"),
   finalPrice: numeric("final_price"),
