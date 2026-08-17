@@ -54,7 +54,12 @@ function TripCard({ item }: { item: any }) {
       <View style={styles.cardFooter}>
         <Text style={styles.metaText}>
           {item.distanceKm ? `${Number(item.distanceKm).toFixed(1)} km • ` : ''}
-          {item.vehicleType} • {item.paymentMethod === 'cash' ? 'Efectivo' : 'Tarjeta'}
+          {item.vehicleType} • {item.paymentMethod === 'cash' ? 'Efectivo' : (
+            item.paymentMethod === 'nequi' ? 'Transferencia (Nequi)' :
+            item.paymentMethod === 'daviplata' ? 'Transferencia (Daviplata)' :
+            item.paymentMethod === 'breve' ? 'Transferencia (Breve)' :
+            item.paymentMethod
+          )}
         </Text>
         {isActive && (
           <View style={styles.activeChip}>

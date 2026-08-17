@@ -23,7 +23,9 @@ const DRIVER_ACCEPT_RADIUS_KM = 1;
 
 const PAYMENT_OPTIONS = [
   { key: 'cash', label: 'Efectivo', icon: '💵' },
-  { key: 'card', label: 'Tarjeta', icon: '💳' },
+  { key: 'nequi', label: 'Nequi (Transferencia)', icon: '💜' },
+  { key: 'daviplata', label: 'Daviplata (Transferencia)', icon: '🔴' },
+  { key: 'breve', label: 'Breve (Transferencia)', icon: '🟡' },
 ] as const;
 
 type PaymentKey = typeof PAYMENT_OPTIONS[number]['key'];
