@@ -209,24 +209,30 @@ router.post("/", authenticate, async (req, res) => {
     vehicleType, paymentMethod, estimatedPrice,
   } = req.body as {
     originLat: number; originLng: number; originAddress: string;
-    destinationLat: number; destinationLng: number; destinationAddress: string;
+    destinationLat?: number | null; destinationLng?: number | null; destinationAddress?: string | null;
     vehicleType: string; paymentMethod: string; estimatedPrice?: number;
   };
 
+  const normalizedOriginAddress = typeof originAddress === "string" ? originAddress.trim() : "";
+  const normalizedDestinationAddress = typeof destinationAddress === "string" ? destinationAddress.trim() : "";
+  const hasDestination =
+    destinationLat != null &&
+    destinationLng != null &&
+    Number.isFinite(destinationLat) &&
+    Number.isFinite(destinationLng) &&
+    normalizedDestinationAddress.length > 0;
+
   const [trip] = await db.insert(tripsTable).values({
-    // Provide driverId explicitly (nullable) and set status early to ensure
-    // parameter ordering matches the table definition and prevents type-mismatch
-    // when optional fields (destination*) are omitted.
     passengerId: user.userId,
     driverId: null,
     status: "pending",
     originLat: String(originLat),
     originLng: String(originLng),
-    originAddress,
-    destinationLat: destinationLat != null ? String(destinationLat) : null,
-    destinationLng: destinationLng != null ? String(destinationLng) : null,
-    destinationAddress: destinationAddress ?? null,
-    destinationPending: (destinationLat == null && destinationLng == null && !destinationAddress) ? true : false,
+    originAddress: normalizedOriginAddress || "Ubicación de origen",
+    destinationLat: hasDestination ? String(destinationLat) : null,
+    destinationLng: hasDestination ? String(destinationLng) : null,
+    destinationAddress: hasDestination ? normalizedDestinationAddress : null,
+    destinationPending: !hasDestination,
     vehicleType,
     paymentMethod,
     estimatedPrice: String(estimatedPrice ?? 0),

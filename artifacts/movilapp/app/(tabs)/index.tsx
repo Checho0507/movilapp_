@@ -373,18 +373,26 @@ function PassengerHome() {
     if (!origin) return;
     setStep('searching');
     try {
-      // If destination is omitted, use origin coords as a placeholder and mark address as "Destino por confirmar"
-      // If destination was omitted, send nulls for destination coordinates/address
-      const finalDestinationLat = dest?.lat ?? null;
-      const finalDestinationLng = dest?.lng ?? null;
-      const finalDestinationAddress = dest?.address ?? null;
+      const normalizedOriginAddress = origin.address?.trim() || 'Ubicación de origen';
+      const normalizedDestinationAddress = typeof dest?.address === 'string' ? dest.address.trim() : '';
+      const hasDestination = !!dest && Number.isFinite(dest.lat) && Number.isFinite(dest.lng) && normalizedDestinationAddress.length > 0;
+
+      const finalDestinationLat = hasDestination ? dest!.lat : null;
+      const finalDestinationLng = hasDestination ? dest!.lng : null;
+      const finalDestinationAddress = hasDestination ? normalizedDestinationAddress : null;
 
       const trip = await createTrip.mutateAsync({
         data: {
-          originLat: origin.lat, originLng: origin.lng, originAddress: origin.address,
-          destinationLat: finalDestinationLat, destinationLng: finalDestinationLng, destinationAddress: finalDestinationAddress,
-          destinationPending: dest ? false : true,
-          vehicleType: 'taxi', paymentMethod,
+          originLat: origin.lat,
+          originLng: origin.lng,
+          originAddress: normalizedOriginAddress,
+          destinationLat: finalDestinationLat,
+          destinationLng: finalDestinationLng,
+          destinationAddress: finalDestinationAddress,
+          destinationPending: !hasDestination,
+          vehicleType: 'taxi',
+          paymentMethod,
+          estimatedPrice: hasDestination ? estimatedPrice : 0,
         } as any,
       });
       setActiveTripId(trip.id);
