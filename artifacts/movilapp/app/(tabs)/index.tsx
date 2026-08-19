@@ -451,15 +451,48 @@ function PassengerHome() {
         tripPayload.estimatedPrice = 0;
       }
 
-      const trip = await createTrip.mutateAsync({ data: tripPayload as any });
-      setActiveTripId(trip.id);
-      joinTrip(trip.id);
-    } catch (err: any) {
-      // Log full error for diagnostics (will appear in adb logcat)
-      console.error('createTrip error:', err);
-      setStep('confirm');
-      const msg = err?.data?.error ?? err?.message ?? (typeof err === 'string' ? err : 'No se pudo solicitar el taxi.');
-      Alert.alert('Error', msg);
+      // Debug log: payload and base URL so network issues can be diagnosed in adb logcat
+      try {
+        console.log('createTrip payload:', JSON.stringify(tripPayload));
+      } catch (e) { console.log('createTrip payload (unserializable)', e); }
+      console.log('API base URL:', getApiUrl());
+
+      try {
+        const trip = await createTrip.mutateAsync({ data: tripPayload as any });
+        setActiveTripId(trip.id);
+        joinTrip(trip.id);
+      } catch (err: any) {
+        // Log full error for diagnostics (will appear in adb logcat)
+        console.error('createTrip error:', err);
+
+        // If it's a network failure from React Native fetch, attempt a direct fetch to surface more info
+        const msg = err?.data?.error ?? err?.message ?? (typeof err === 'string' ? err : null);
+        if (msg && typeof msg === 'string' && msg.toLowerCase().includes('network request failed')) {
+          try {
+            const base = getApiUrl();
+            console.log('Retrying createTrip with direct fetch to', `${base}/trips`);
+            const token = await AsyncStorage.getItem('auth_token');
+            const res = await fetch(`${base}/trips`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `****** },
+              body: JSON.stringify(tripPayload),
+            });
+            const text = await res.text();
+            console.log('Direct fetch response status:', res.status, 'body:', text);
+            if (!res.ok) throw new Error(`Direct fetch failed: ${res.status} ${text}`);
+            const json = JSON.parse(text || '{}');
+            setActiveTripId(json.id);
+            joinTrip(json.id);
+            return;
+          } catch (e2: any) {
+            console.error('Direct fetch createTrip error:', e2);
+          }
+        }
+
+        setStep('confirm');
+        const fallbackMsg = err?.data?.error ?? err?.message ?? (typeof err === 'string' ? err : 'No se pudo solicitar el taxi.');
+        Alert.alert('Error', fallbackMsg);
+      }
     }
   };
 
