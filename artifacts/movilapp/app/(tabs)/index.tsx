@@ -9,6 +9,7 @@ import type { Region } from '@/lib/maps';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
+import Svg, { Path, Rect, Circle } from 'react-native-svg';
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCreateTrip, useUpdateDriverStatus, useUpdateDriverLocation, useUpdateTripStatus } from '@workspace/api-client-react';
@@ -22,13 +23,62 @@ const BOGOTA: Region = { latitude: 4.711, longitude: -74.0721, latitudeDelta: 0.
 const DRIVER_ACCEPT_RADIUS_KM = 1;
 
 const PAYMENT_OPTIONS = [
-  { key: 'cash', label: 'Efectivo', icon: '💵' },
-  { key: 'nequi', label: 'Nequi (Transferencia)', icon: '💜' },
-  { key: 'daviplata', label: 'Daviplata (Transferencia)', icon: '🔴' },
-  { key: 'breve', label: 'Breve (Transferencia)', icon: '🟡' },
+  { key: 'cash', label: 'Efectivo' },
+  { key: 'transfer', label: 'Transferencia' },
 ] as const;
 
-type PaymentKey = typeof PAYMENT_OPTIONS[number]['key'];
+const TRANSFER_OPTIONS = [
+  { key: 'nequi', label: 'Nequi' },
+  { key: 'daviplata', label: 'Daviplata' },
+  { key: 'breve', label: 'Breve' },
+] as const;
+
+type PaymentKey = 'cash' | 'transfer';
+type TransferKey = typeof TRANSFER_OPTIONS[number]['key'];
+
+function PaymentIcon({ type }: { type: 'cash' | 'transfer' | 'nequi' | 'daviplata' | 'breve' }) {
+  const yellow = '#F6C949';
+  const yellowSoft = '#F0B400';
+  const dark = '#1E1B18';
+
+  if (type === 'cash') {
+    return (
+      <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+        <Rect x="3.5" y="6" width="17" height="12" rx="2.5" fill={yellow} />
+        <Path d="M7 10.5H15.5C16.88 10.5 18 9.38 18 8V7.5H9.5C8.12 7.5 7 8.62 7 10V10.5Z" fill={yellowSoft} opacity={0.8} />
+        <Path d="M8 14.5H16.5M8 17.5H14" stroke={dark} strokeWidth="1.6" strokeLinecap="round" />
+        <Circle cx="17.5" cy="10" r="1.8" fill={dark} />
+      </Svg>
+    );
+  }
+
+  if (type === 'transfer') {
+    return (
+      <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+        <Rect x="4" y="5" width="12" height="14" rx="2.8" fill={yellow} />
+        <Rect x="8" y="3.5" width="12" height="14" rx="2.8" fill={yellowSoft} opacity={0.95} />
+        <Path d="M9 10.5L7.5 9L9 7.5M15 13.5L16.5 15L15 16.5" stroke={dark} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        <Path d="M7.5 9H13.5C15.16 9 16.5 10.34 16.5 12V13M16.5 15H10.5C8.84 15 7.5 13.66 7.5 12V11" stroke={dark} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </Svg>
+    );
+  }
+
+  const accent = type === 'nequi' ? '#F7D449' : type === 'daviplata' ? '#F0B400' : '#F8E27F';
+  return (
+    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+      <Circle cx="12" cy="12" r="8" fill={yellow} />
+      <Path d="M8.5 8.5H15.5V10.3H12.5V15.5H10.7V10.3H8.5V8.5Z" fill={dark} />
+      <Circle cx="16.2" cy="7.5" r="2.2" fill={accent} opacity={0.65} />
+    </Svg>
+  );
+}
+
+function getPaymentInfo(method?: string) {
+  if (method === 'cash') return { kind: 'cash' as const, label: 'Efectivo' };
+  const transferMatch = TRANSFER_OPTIONS.find(opt => opt.key === method);
+  if (transferMatch) return { kind: method as 'nequi' | 'daviplata' | 'breve', label: `Transferencia (${transferMatch.label})` };
+  return { kind: 'cash' as const, label: 'Efectivo' };
+}
 
 type Step = 'idle' | 'selectOrigin' | 'selectDest' | 'confirm' | 'searching' | 'no_drivers';
 type Pin = { lat: number; lng: number; address: string };
@@ -219,6 +269,9 @@ function PassengerHome() {
   const [distanceKm, setDistanceKm] = useState(0);
   const [activeTripId, setActiveTripId] = useState<number | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentKey>('cash');
+  const [transferMethod, setTransferMethod] = useState<TransferKey>('nequi');
+
+  const effectivePaymentMethod = paymentMethod === 'transfer' ? transferMethod : paymentMethod;
 
   // Address search state
   const [userLoc, setUserLoc] = useState<{ lat: number; lng: number } | null>(null);
@@ -382,7 +435,7 @@ function PassengerHome() {
         originLng: origin.lng,
         originAddress: normalizedOriginAddress,
         vehicleType: 'taxi',
-        paymentMethod,
+        paymentMethod: effectivePaymentMethod,
       };
 
       if (hasDestination) {
@@ -690,16 +743,36 @@ function PassengerHome() {
                 <TouchableOpacity
                   key={opt.key}
                   style={[styles.payChip, paymentMethod === opt.key && styles.payChipActive]}
-                  onPress={() => setPaymentMethod(opt.key)}
+                  onPress={() => {
+                    setPaymentMethod(opt.key as PaymentKey);
+                    if (opt.key === 'transfer') setTransferMethod('nequi');
+                  }}
                   activeOpacity={0.75}
                 >
-                  <Text style={styles.payChipIcon}>{opt.icon}</Text>
+                  <View style={styles.payChipIcon}><PaymentIcon type={opt.key === 'transfer' ? 'transfer' : 'cash'} /></View>
                   <Text style={[styles.payChipText, paymentMethod === opt.key && styles.payChipTextActive]}>
                     {opt.label}
                   </Text>
                 </TouchableOpacity>
               ))}
             </View>
+            {paymentMethod === 'transfer' && (
+              <View style={[styles.payRow, { marginTop: 8 }]}>
+                {TRANSFER_OPTIONS.map(opt => (
+                  <TouchableOpacity
+                    key={opt.key}
+                    style={[styles.payChip, transferMethod === opt.key && styles.payChipActive]}
+                    onPress={() => setTransferMethod(opt.key as TransferKey)}
+                    activeOpacity={0.75}
+                  >
+                    <View style={styles.payChipIcon}><PaymentIcon type={opt.key as 'nequi' | 'daviplata' | 'breve'} /></View>
+                    <Text style={[styles.payChipText, transferMethod === opt.key && styles.payChipTextActive]}>
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
           </View>
 
           <TouchableOpacity style={styles.primaryBtn} onPress={requestTaxi} disabled={createTrip.isPending} activeOpacity={0.85}>
@@ -747,16 +820,36 @@ function PassengerHome() {
                 <TouchableOpacity
                   key={opt.key}
                   style={[styles.payChip, paymentMethod === opt.key && styles.payChipActive]}
-                  onPress={() => setPaymentMethod(opt.key)}
+                  onPress={() => {
+                    setPaymentMethod(opt.key as PaymentKey);
+                    if (opt.key === 'transfer') setTransferMethod('nequi');
+                  }}
                   activeOpacity={0.75}
                 >
-                  <Text style={styles.payChipIcon}>{opt.icon}</Text>
+                  <View style={styles.payChipIcon}><PaymentIcon type={opt.key === 'transfer' ? 'transfer' : 'cash'} /></View>
                   <Text style={[styles.payChipText, paymentMethod === opt.key && styles.payChipTextActive]}>
                     {opt.label}
                   </Text>
                 </TouchableOpacity>
               ))}
             </View>
+            {paymentMethod === 'transfer' && (
+              <View style={[styles.payRow, { marginTop: 8 }]}>
+                {TRANSFER_OPTIONS.map(opt => (
+                  <TouchableOpacity
+                    key={opt.key}
+                    style={[styles.payChip, transferMethod === opt.key && styles.payChipActive]}
+                    onPress={() => setTransferMethod(opt.key as TransferKey)}
+                    activeOpacity={0.75}
+                  >
+                    <View style={styles.payChipIcon}><PaymentIcon type={opt.key as 'nequi' | 'daviplata' | 'breve'} /></View>
+                    <Text style={[styles.payChipText, transferMethod === opt.key && styles.payChipTextActive]}>
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
           </View>
 
           <TouchableOpacity style={styles.primaryBtn} onPress={requestTaxi} disabled={createTrip.isPending} activeOpacity={0.85}>
@@ -980,8 +1073,15 @@ function DriverHome() {
 
       <View style={[styles.topLabel, { top: insets.top + (Platform.OS === 'web' ? 67 : 16) }]}>
         <View style={styles.driverTopRow}>
-          <View>
-            <Text style={styles.topLabelText}>{isOnline ? '🟢 En línea — recibiendo solicitudes' : '⚫ Fuera de línea'}</Text>
+          <View style={{ flex: 1 }}>
+            {isOnline ? (
+              <>
+                <Text style={styles.topLabelText}>🟢 En línea</Text>
+                <Text style={styles.topLabelSubText}>Recibiendo solicitudes</Text>
+              </>
+            ) : (
+              <Text style={styles.topLabelText}>⚫ Fuera de línea</Text>
+            )}
           </View>
           <TouchableOpacity
             style={[styles.toggleBtn, isOnline ? styles.toggleBtnOn : styles.toggleBtnOff]}
@@ -1009,15 +1109,17 @@ function DriverHome() {
               </View>
               <View style={{ gap: 4 }}>
                 <View style={styles.reqRow}><Feather name="circle" size={9} color={colors.light.primary} /><Text style={styles.reqText} numberOfLines={1}>{req.originAddress}</Text></View>
-                <View style={styles.reqRow}><Feather name="map-pin" size={9} color={colors.light.destructive} /><Text style={styles.reqText} numberOfLines={1}>{req.destinationAddress}</Text></View>
+                {req.destinationAddress && req.destinationAddress !== req.originAddress && (
+                  <View style={styles.reqRow}><Feather name="map-pin" size={9} color={colors.light.destructive} /><Text style={styles.reqText} numberOfLines={1}>{req.destinationAddress}</Text></View>
+                )}
               </View>
               <View style={styles.requestMeta}>
                 <Text style={styles.reqPrice}>${Number(req.estimatedPrice).toLocaleString('es-CO')}</Text>
                 <Text style={styles.reqDist}>{Number(req.distanceKm).toFixed(1)} km</Text>
                 <View style={styles.reqPayBadge}>
+                  <View style={styles.reqPayIcon}><PaymentIcon type={getPaymentInfo(req.paymentMethod).kind} /></View>
                   <Text style={styles.reqPayText}>
-                    {PAYMENT_OPTIONS.find(p => p.key === (req.paymentMethod ?? 'cash'))?.icon ?? '💵'}{' '}
-                    {PAYMENT_OPTIONS.find(p => p.key === (req.paymentMethod ?? 'cash'))?.label ?? 'Efectivo'}
+                    {getPaymentInfo(req.paymentMethod).label}
                   </Text>
                 </View>
               </View>
@@ -1092,6 +1194,8 @@ const styles = StyleSheet.create({
   toggleBtnOn: { backgroundColor: colors.light.destructive + 'CC' },
   toggleBtnOff: { backgroundColor: colors.light.primary },
   toggleBtnText: { fontSize: 12, fontWeight: '700', color: '#fff', fontFamily: 'Inter_700Bold' },
+  topLabelSubText: { fontSize: 12, color: colors.light.mutedForeground, marginTop: 2, fontFamily: 'Inter_600SemiBold' },
+  topLabelText: { fontSize: 13, fontWeight: '600', color: colors.light.foreground, fontFamily: 'Inter_600SemiBold' },
   // Searching overlay
   searchingOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -1221,11 +1325,12 @@ const styles = StyleSheet.create({
   reqPrice: { fontSize: 20, fontWeight: '700', color: colors.light.primary, fontFamily: 'Inter_700Bold' },
   reqDist: { fontSize: 13, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
   reqPayBadge: {
-    flexDirection: 'row', alignItems: 'center',
+    flexDirection: 'row', alignItems: 'center', gap: 6,
     backgroundColor: colors.light.secondary, borderRadius: 12,
     paddingHorizontal: 8, paddingVertical: 3,
     borderWidth: 1, borderColor: colors.light.border,
   },
+  reqPayIcon: { width: 16, height: 16, alignItems: 'center', justifyContent: 'center' },
   reqPayText: { fontSize: 12, color: colors.light.foreground, fontFamily: 'Inter_600SemiBold' },
   // Payment method selector in confirm sheet
   paySection: { gap: 8 },
@@ -1237,7 +1342,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.light.secondary, borderWidth: 1, borderColor: colors.light.border,
   },
   payChipActive: { backgroundColor: colors.light.primary, borderColor: colors.light.primary },
-  payChipIcon: { fontSize: 14 },
+  payChipIcon: { width: 16, height: 16, alignItems: 'center', justifyContent: 'center' },
   payChipText: { fontSize: 13, fontWeight: '600', color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold' },
   payChipTextActive: { color: colors.light.primaryForeground },
   acceptBtn: { backgroundColor: colors.light.primary, borderRadius: colors.radius - 2, paddingVertical: 12, alignItems: 'center' },

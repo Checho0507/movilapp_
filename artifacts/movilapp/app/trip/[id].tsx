@@ -189,6 +189,17 @@ export default function TripScreen() {
     if (!isDriver && trip?.status === 'completed' && !ratingSubmitted) setShowRating(true);
   }, [trip?.status]);
 
+  // If the trip's origin and destination are identical, skip the price-report modal entirely
+  useEffect(() => {
+    if (!showPriceReport) return;
+    const sameOriginDest = (trip?.originLat != null && trip?.destinationLat != null) &&
+      (Number(trip.originLat) === Number(trip.destinationLat) && Number(trip.originLng) === Number(trip.destinationLng));
+    if (sameOriginDest) {
+      setShowPriceReport(false);
+      router.back();
+    }
+  }, [showPriceReport, trip?.originLat, trip?.destinationLat, trip?.originLng, trip?.destinationLng]);
+
   // Socket events
   useEffect(() => {
     if (!socket) return;
@@ -351,9 +362,11 @@ export default function TripScreen() {
         <Marker coordinate={{ latitude: trip.originLat, longitude: trip.originLng }} title="Origen">
           <View style={[styles.markerPin, { backgroundColor: colors.light.primary }]} />
         </Marker>
-        <Marker coordinate={{ latitude: trip.destinationLat, longitude: trip.destinationLng }} title="Destino">
-          <View style={[styles.markerPin, { backgroundColor: colors.light.destructive }]} />
-        </Marker>
+        { (trip.destinationLat != null && trip.destinationLng != null && !(Number(trip.destinationLat) === Number(trip.originLat) && Number(trip.destinationLng) === Number(trip.originLng))) && (
+          <Marker coordinate={{ latitude: trip.destinationLat, longitude: trip.destinationLng }} title="Destino">
+            <View style={[styles.markerPin, { backgroundColor: colors.light.destructive }]} />
+          </Marker>
+        ) }
         {trip.driver && (
           <Marker coordinate={{ latitude: driverLat, longitude: driverLng }} title={trip.driver.name}>
             <View style={styles.taxiMarker}>
@@ -469,7 +482,9 @@ export default function TripScreen() {
               </View>
               <View style={styles.routeBlock}>
                 <View style={styles.routeRow}><Feather name="circle" size={9} color={colors.light.primary} /><Text style={styles.routeText} numberOfLines={1}>{trip.originAddress}</Text></View>
-                <View style={styles.routeRow}><Feather name="map-pin" size={9} color={colors.light.destructive} /><Text style={styles.routeText} numberOfLines={1}>{trip.destinationAddress ?? 'No especificado'}</Text></View>
+                {(trip.destinationAddress && !(trip.destinationAddress === trip.originAddress)) && (
+                  <View style={styles.routeRow}><Feather name="map-pin" size={9} color={colors.light.destructive} /><Text style={styles.routeText} numberOfLines={1}>{trip.destinationAddress}</Text></View>
+                )}
               </View>
 
               {/* Passenger code (for passenger, shown while driver hasn't started trip) */}
