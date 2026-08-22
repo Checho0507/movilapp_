@@ -439,16 +439,30 @@ function PassengerHome() {
       };
 
       if (hasDestination) {
-        tripPayload.destinationLat = dest!.lat;
-        tripPayload.destinationLng = dest!.lng;
+        tripPayload.destinationLat = Number(dest!.lat);
+        tripPayload.destinationLng = Number(dest!.lng);
         tripPayload.destinationAddress = normalizedDestinationAddress;
-        tripPayload.estimatedPrice = estimatedPrice;
+        tripPayload.estimatedPrice = Number(estimatedPrice) || 0;
+        tripPayload.destinationPending = false;
       } else {
-        tripPayload.destinationLat = origin.lat;
-        tripPayload.destinationLng = origin.lng;
+        // When user omits destination, send the origin values as destination (do NOT send nulls)
+        tripPayload.destinationLat = Number(origin.lat);
+        tripPayload.destinationLng = Number(origin.lng);
         tripPayload.destinationAddress = normalizedOriginAddress;
         tripPayload.destinationPending = true;
         tripPayload.estimatedPrice = 0;
+      }
+
+      // Sanitize payload: remove any accidental null/undefined and ensure numeric fields are numbers
+      for (const k of Object.keys(tripPayload)) {
+        const v = (tripPayload as any)[k];
+        if (v === null || v === undefined) {
+          delete (tripPayload as any)[k];
+          continue;
+        }
+        if (k.toLowerCase().endsWith('lat') || k.toLowerCase().endsWith('lng') || k.toLowerCase().includes('price') || k === 'estimatedPrice') {
+          (tripPayload as any)[k] = Number(v) || 0;
+        }
       }
 
       // Debug log: payload and base URL so network issues can be diagnosed in adb logcat
