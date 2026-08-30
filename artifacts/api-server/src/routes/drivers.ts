@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { usersTable, vehiclesTable, tripsTable, subscriptionsTable, SUBSCRIPTION_PLANS } from "@workspace/db";
-import { eq, and, sql, or, inArray } from "drizzle-orm";
+import { eq, and, sql, or, inArray, desc } from "drizzle-orm";
 import { authenticate, requireRole } from "../lib/auth.js";
 import { formatUser } from "./auth.js";
 import type { Server as IOServer } from "socket.io";
@@ -281,7 +281,7 @@ router.post("/renew-subscription", authenticate, requireRole("driver"), async (r
     .select()
     .from(subscriptionsTable)
     .where(eq(subscriptionsTable.driverId, driverId))
-    .orderBy(subscriptionsTable.expiresAt)
+    .orderBy(desc(subscriptionsTable.expiresAt))
     .limit(1);
 
   const now = new Date();
@@ -333,7 +333,7 @@ router.get("/me/subscription", authenticate, requireRole("driver"), async (req, 
     .select()
     .from(subscriptionsTable)
     .where(eq(subscriptionsTable.driverId, driverId))
-    .orderBy(subscriptionsTable.expiresAt)
+    .orderBy(desc(subscriptionsTable.expiresAt))
     .limit(1);
 
   if (!sub) {
