@@ -1,12 +1,37 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { tripsTable, messagesTable, ratingsTable, usersTable, subscriptionsTable } from "@workspace/db";
-import { eq, and, desc, sql, inArray, gt } from "drizzle-orm";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import { authenticate } from "../lib/auth.js";
 import { formatUser } from "./auth.js";
 import type { Server as IOServer } from "socket.io";
 
 const router = Router();
+
+async function ensureDriverHasStarterSubscription(driverId: number) {
+  const [existing] = await db
+    .select({ id: subscriptionsTable.id, expiresAt: subscriptionsTable.expiresAt })
+    .from(subscriptionsTable)
+    .where(eq(subscriptionsTable.driverId, driverId))
+    .orderBy(subscriptionsTable.expiresAt)
+    .limit(1);
+
+  if (existing) return existing;
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000);
+  return db
+    .insert(subscriptionsTable)
+    .values({
+      driverId,
+      plan: "trial",
+      priceCop: 0,
+      startsAt: now,
+      expiresAt,
+      isTrial: true,
+    })
+    .returning();
+}
 
 let io: IOServer | null = null;
 export function setIO(ioInstance: IOServer) {
@@ -16,8 +41,8 @@ export function setIO(ioInstance: IOServer) {
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /**
- * Retry trip:new_request up to 3 rounds (0s, 10s, 20s).
- * After 30s with no acceptance, auto-cancels the trip and notifies the passenger.
+ * Re-broadcast trip:new_request every 30s for up to 2 minutes to nearby eligible drivers.
+ * If nobody accepts within 2 minutes, the trip auto-cancels and informs the passenger.
  */
 async function scheduleRetries(
   tripId: number,
@@ -27,12 +52,14 @@ async function scheduleRetries(
   originLng: number,
   enriched: any,
 ) {
-  for (let round = 2; round <= 3; round++) {
-    await sleep(10_000);
+  const retryDelaysMs = [30_000, 60_000, 90_000, 120_000];
+
+  for (const delayMs of retryDelaysMs) {
+    await sleep(delayMs);
     const [current] = await db
       .select({ id: tripsTable.id, status: tripsTable.status })
       .from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
-    if (!current || current.status !== "pending") return; // accepted / cancelled already
+    if (!current || current.status !== "pending") return;
 
     const eligibleIds = await getEligibleDriverIds(paymentMethod, originLat, originLng);
     for (const driverId of eligibleIds) {
@@ -40,8 +67,7 @@ async function scheduleRetries(
     }
   }
 
-  // 10 s after the 3rd emit — if still pending, auto-cancel
-  await sleep(10_000);
+  await sleep(5_000);
   const [current] = await db
     .select({ id: tripsTable.id, status: tripsTable.status })
     .from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
@@ -58,6 +84,50 @@ async function scheduleRetries(
     io?.to(`user:${passengerId}`).emit("trip_status_updated", enrichedCancelled);
     io?.to(`trip:${tripId}`).emit("trip:cancelled", enrichedCancelled);
   }
+}
+
+export function resolveTripDestination(input: {
+  originLat: number;
+  originLng: number;
+  destinationLat?: number | null;
+  destinationLng?: number | null;
+  destinationAddress?: string | null;
+  originAddress?: string | null;
+  destinationPending?: boolean;
+}) {
+  const normalizedOriginAddress = typeof input.originAddress === "string" ? input.originAddress.trim() : "";
+  const normalizedDestinationAddress = typeof input.destinationAddress === "string" ? input.destinationAddress.trim() : "";
+
+  const sameAsOrigin =
+    typeof input.destinationLat === "number" &&
+    typeof input.destinationLng === "number" &&
+    Number.isFinite(input.destinationLat) &&
+    Number.isFinite(input.destinationLng) &&
+    Number(input.destinationLat) === Number(input.originLat) &&
+    Number(input.destinationLng) === Number(input.originLng);
+
+  const hasDestination =
+    typeof input.destinationLat === "number" &&
+    typeof input.destinationLng === "number" &&
+    Number.isFinite(input.destinationLat) &&
+    Number.isFinite(input.destinationLng) &&
+    normalizedDestinationAddress.length > 0 &&
+    !sameAsOrigin;
+
+  const destinationPending = input.destinationPending === true || !hasDestination;
+  const finalDestinationLat = hasDestination ? input.destinationLat : input.originLat;
+  const finalDestinationLng = hasDestination ? input.destinationLng : input.originLng;
+  const fallbackDestinationAddress = normalizedDestinationAddress || normalizedOriginAddress || "Ubicación de origen";
+  const finalDestinationAddress = hasDestination ? normalizedDestinationAddress : fallbackDestinationAddress;
+
+  return {
+    sameAsOrigin,
+    hasDestination,
+    destinationPending,
+    finalDestinationLat,
+    finalDestinationLng,
+    finalDestinationAddress,
+  };
 }
 
 function formatTrip(
@@ -140,6 +210,20 @@ function withinRadius(lat: number, lng: number, radiusKm = 1) {
  * - cash: all nearby online drivers
  * - nequi/daviplata/breve: only nearby drivers who have that method in acceptedPayments
  */
+async function getOnlineDriverIds(): Promise<number[]> {
+ const rows = await db
+   .select({ id: usersTable.id })
+   .from(usersTable)
+   .where(
+     and(
+       eq(usersTable.role, "driver"),
+       eq(usersTable.isOnline, true),
+       eq(usersTable.isActive, true),
+     )
+   );
+ return rows.map(r => r.id);
+}
+
 async function getEligibleDriverIds(
   paymentMethod: string,
   originLat: number,
@@ -215,19 +299,22 @@ router.post("/", authenticate, async (req, res) => {
     destinationPending?: boolean;
   };
 
-  const normalizedOriginAddress = typeof originAddress === "string" ? originAddress.trim() : "";
-  const normalizedDestinationAddress = typeof destinationAddress === "string" ? destinationAddress.trim() : "";
-  const hasDestination =
-    typeof destinationLat === "number" &&
-    typeof destinationLng === "number" &&
-    Number.isFinite(destinationLat) &&
-    Number.isFinite(destinationLng) &&
-    normalizedDestinationAddress.length > 0;
+  const destinationResolution = resolveTripDestination({
+    originLat,
+    originLng,
+    destinationLat,
+    destinationLng,
+    destinationAddress,
+    originAddress,
+    destinationPending,
+  });
 
-  const tripDestinationPending = destinationPending === true || !hasDestination;
-  const finalDestinationLat = hasDestination ? destinationLat : originLat;
-  const finalDestinationLng = hasDestination ? destinationLng : originLng;
-  const finalDestinationAddress = hasDestination ? normalizedDestinationAddress : (normalizedOriginAddress || "Ubicación de origen");
+  const {
+    destinationPending: tripDestinationPending,
+    finalDestinationLat,
+    finalDestinationLng,
+    finalDestinationAddress,
+  } = destinationResolution;
 
   const [trip] = await db.insert(tripsTable).values({
     passengerId: user.userId,
@@ -247,9 +334,12 @@ router.post("/", authenticate, async (req, res) => {
 
   const enriched = await enrichTrip(trip);
 
-  // Notify only eligible online drivers within 1 km, filtered by payment method
+  // Notify immediately to nearby eligible drivers and, as a fallback, to all online drivers
+  // so the trip appears without waiting for slow reconnections or stale location data.
   const eligibleIds = await getEligibleDriverIds(paymentMethod ?? "cash", originLat, originLng);
-  for (const driverId of eligibleIds) {
+  const fallbackIds = eligibleIds.length > 0 ? eligibleIds : await getOnlineDriverIds();
+  const broadcastIds = [...new Set(fallbackIds)];
+  for (const driverId of broadcastIds) {
     io?.to(`user:${driverId}`).emit("trip:new_request", enriched);
   }
 
@@ -339,19 +429,26 @@ router.patch("/:id/status", authenticate, async (req, res) => {
   const updates: Partial<typeof tripsTable.$inferInsert> = { status };
 
   if (status === "accepted") {
-    // Verify the driver has an active subscription before allowing them to accept trips
-    const [activeSub] = await db
-      .select({ id: subscriptionsTable.id })
+    // Allow a driver without a subscription record to receive a starter trial automatically.
+    const [existingSub] = await db
+      .select({ id: subscriptionsTable.id, expiresAt: subscriptionsTable.expiresAt })
       .from(subscriptionsTable)
-      .where(
-        and(
-          eq(subscriptionsTable.driverId, user.userId),
-          gt(subscriptionsTable.expiresAt, new Date()),
-        )
-      )
+      .where(eq(subscriptionsTable.driverId, user.userId))
+      .orderBy(subscriptionsTable.expiresAt)
       .limit(1);
 
-    if (!activeSub) {
+    if (!existingSub) {
+      await ensureDriverHasStarterSubscription(user.userId);
+    }
+
+    const [activeSub] = await db
+      .select({ id: subscriptionsTable.id, expiresAt: subscriptionsTable.expiresAt })
+      .from(subscriptionsTable)
+      .where(eq(subscriptionsTable.driverId, user.userId))
+      .orderBy(subscriptionsTable.expiresAt)
+      .limit(1);
+
+    if (!activeSub || new Date(activeSub.expiresAt).getTime() <= Date.now()) {
       res.status(403).json({
         error: "Tu suscripción ha vencido. No puedes aceptar carreras.",
         code: "SUBSCRIPTION_REQUIRED",

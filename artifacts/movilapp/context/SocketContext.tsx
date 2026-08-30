@@ -30,9 +30,13 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     const s = io(socketBaseUrl, {
       path: '/api/socket.io',
       auth: { token },
-      transports: ['websocket'],
+      transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 500,
+      reconnectionDelayMax: 1500,
+      timeout: 10000,
+      forceNew: true,
     });
     socketRef.current = s;
     setSocket(s);

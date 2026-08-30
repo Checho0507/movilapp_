@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
-import { usersTable, vehiclesTable, tripsTable, subscriptionsTable } from "@workspace/db";
-import { eq, and, sql, or, inArray, gt } from "drizzle-orm";
+import { usersTable, vehiclesTable, tripsTable, subscriptionsTable, SUBSCRIPTION_PLANS } from "@workspace/db";
+import { eq, and, sql, or, inArray } from "drizzle-orm";
 import { authenticate, requireRole } from "../lib/auth.js";
 import { formatUser } from "./auth.js";
 import type { Server as IOServer } from "socket.io";
@@ -9,6 +9,51 @@ import type { Server as IOServer } from "socket.io";
 const router = Router();
 
 const VALID_PAYMENT_METHODS = ["nequi", "daviplata", "breve"] as const;
+const VALID_RENEWAL_PLANS = ["daily", "weekly", "biweekly", "monthly"] as const;
+const VALID_RENEWAL_PAYMENT_METHODS = ["pse", "tarjeta", "nequi", "daviplata"] as const;
+
+export function normalizeRenewalRequest(input: { plan?: string; paymentMethod?: string }) {
+  const plan = typeof input.plan === "string" ? input.plan.trim().toLowerCase() : "";
+  const paymentMethod = typeof input.paymentMethod === "string" ? input.paymentMethod.trim().toLowerCase() : "";
+
+  const isPlanValid = (VALID_RENEWAL_PLANS as readonly string[]).includes(plan);
+  const isPaymentValid = (VALID_RENEWAL_PAYMENT_METHODS as readonly string[]).includes(paymentMethod);
+
+  return {
+    plan,
+    paymentMethod,
+    isPlanValid,
+    isPaymentValid,
+    planData: isPlanValid ? (SUBSCRIPTION_PLANS as Record<string, any>)[plan] : null,
+  };
+}
+
+async function ensureDriverHasStarterSubscription(driverId: number) {
+  const [existing] = await db
+    .select({ id: subscriptionsTable.id, expiresAt: subscriptionsTable.expiresAt })
+    .from(subscriptionsTable)
+    .where(eq(subscriptionsTable.driverId, driverId))
+    .orderBy(subscriptionsTable.expiresAt)
+    .limit(1);
+
+  if (existing) return existing;
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000);
+  const [subscription] = await db
+    .insert(subscriptionsTable)
+    .values({
+      driverId,
+      plan: "trial",
+      priceCop: 0,
+      startsAt: now,
+      expiresAt,
+      isTrial: true,
+    })
+    .returning();
+
+  return subscription;
+}
 
 let io: IOServer | null = null;
 export function setIO(ioInstance: IOServer) {
@@ -20,20 +65,27 @@ router.patch("/status", authenticate, requireRole("driver"), async (req, res) =>
   const { isOnline } = req.body as { isOnline: boolean };
   const driverId = req.user!.userId;
 
-  // Block going online with an expired or missing subscription
+  // Allow a brand-new driver to get a starter trial automatically, but still block expired subscriptions.
   if (isOnline) {
     const [activeSub] = await db
-      .select({ id: subscriptionsTable.id })
+      .select({ id: subscriptionsTable.id, expiresAt: subscriptionsTable.expiresAt })
       .from(subscriptionsTable)
-      .where(
-        and(
-          eq(subscriptionsTable.driverId, driverId),
-          gt(subscriptionsTable.expiresAt, new Date()),
-        )
-      )
+      .where(eq(subscriptionsTable.driverId, driverId))
+      .orderBy(subscriptionsTable.expiresAt)
       .limit(1);
 
     if (!activeSub) {
+      await ensureDriverHasStarterSubscription(driverId);
+    }
+
+    const [validatedSub] = await db
+      .select({ id: subscriptionsTable.id, expiresAt: subscriptionsTable.expiresAt })
+      .from(subscriptionsTable)
+      .where(eq(subscriptionsTable.driverId, driverId))
+      .orderBy(subscriptionsTable.expiresAt)
+      .limit(1);
+
+    if (!validatedSub || new Date(validatedSub.expiresAt).getTime() <= Date.now()) {
       res.status(403).json({
         error: "Tu suscripción ha vencido. Contacta al administrador para renovar tu plan.",
         code: "SUBSCRIPTION_REQUIRED",
@@ -209,6 +261,70 @@ router.get("/nearby", authenticate, async (req, res) => {
   res.json(result);
 });
 
+// POST /api/drivers/renew-subscription
+router.post("/renew-subscription", authenticate, requireRole("driver"), async (req, res) => {
+  const { plan, paymentMethod } = req.body as { plan?: string; paymentMethod?: string };
+  const normalized = normalizeRenewalRequest({ plan, paymentMethod });
+
+  if (!normalized.isPlanValid) {
+    res.status(400).json({ error: "Plan de suscripción inválido." });
+    return;
+  }
+
+  if (!normalized.isPaymentValid) {
+    res.status(400).json({ error: "Método de pago inválido. Usa PSE, tarjeta, Nequi o Daviplata." });
+    return;
+  }
+
+  const driverId = req.user!.userId;
+  const [activeSub] = await db
+    .select()
+    .from(subscriptionsTable)
+    .where(eq(subscriptionsTable.driverId, driverId))
+    .orderBy(subscriptionsTable.expiresAt)
+    .limit(1);
+
+  const now = new Date();
+  if (activeSub) {
+    const daysRemaining = Math.max(0, Math.ceil((activeSub.expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
+    // Allow renewal only if subscription is expired or about to expire (<=5 days)
+    if (daysRemaining > 5) {
+      res.status(409).json({ error: "Tu suscripción actual aún está vigente. Puedes renovar cuando falten 5 días para vencer." });
+      return;
+    }
+  }
+
+  const planInfo = normalized.planData;
+  const expiresAt = new Date(now.getTime() + planInfo.days * 24 * 60 * 60 * 1000);
+
+  const [subscription] = await db
+    .insert(subscriptionsTable)
+    .values({
+      driverId,
+      plan: normalized.plan,
+      priceCop: planInfo.priceCop,
+      startsAt: now,
+      expiresAt,
+      isTrial: false,
+      createdById: driverId,
+      notes: `Pago en línea: ${normalized.paymentMethod}`,
+    })
+    .returning();
+
+  res.status(201).json({
+    id: subscription.id,
+    plan: subscription.plan,
+    planLabel: SUBSCRIPTION_PLANS[subscription.plan as keyof typeof SUBSCRIPTION_PLANS]?.label ?? subscription.plan,
+    priceCop: subscription.priceCop,
+    startsAt: subscription.startsAt.toISOString(),
+    expiresAt: subscription.expiresAt.toISOString(),
+    isTrial: subscription.isTrial,
+    isActive: true,
+    daysRemaining: Math.max(0, Math.ceil((subscription.expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))),
+    paymentMethod: normalized.paymentMethod,
+  });
+});
+
 // GET /api/drivers/me/subscription — current driver's active subscription
 router.get("/me/subscription", authenticate, requireRole("driver"), async (req, res) => {
   const driverId = req.user!.userId;
@@ -221,7 +337,22 @@ router.get("/me/subscription", authenticate, requireRole("driver"), async (req, 
     .limit(1);
 
   if (!sub) {
-    res.status(404).json({ error: "No subscription found" });
+    const [createdSub] = await ensureDriverHasStarterSubscription(driverId);
+    if (!createdSub) {
+      res.status(404).json({ error: "No subscription found" });
+      return;
+    }
+    res.json({
+      id: createdSub.id,
+      plan: createdSub.plan,
+      planLabel: "Prueba gratuita",
+      priceCop: createdSub.priceCop,
+      startsAt: createdSub.startsAt.toISOString(),
+      expiresAt: createdSub.expiresAt.toISOString(),
+      isTrial: createdSub.isTrial,
+      isActive: true,
+      daysRemaining: Math.max(0, Math.ceil((createdSub.expiresAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24))),
+    });
     return;
   }
 

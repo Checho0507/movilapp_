@@ -12,6 +12,7 @@ import { Feather } from '@expo/vector-icons';
 import Svg, { Path, Rect, Circle } from 'react-native-svg';
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Speech from 'expo-speech';
 import { useCreateTrip, useUpdateDriverStatus, useUpdateDriverLocation, useUpdateTripStatus } from '@workspace/api-client-react';
 import { useAuth } from '@/context/AuthContext';
 import { useSocket } from '@/context/SocketContext';
@@ -86,59 +87,165 @@ type Pin = { lat: number; lng: number; address: string };
 type SearchResult = { lat: number; lng: number; address: string };
 
 const NOMINATIM = 'https://nominatim.openstreetmap.org';
+const NOMINATIM_TIMEOUT_MS = 1500;
 const UA = { 'User-Agent': 'MovilApp/1.0' };
+const geocodeCache = new Map<string, SearchResult[]>();
 
 // Expand common Colombian address abbreviations so the geocoder understands them
 function normalizeAddress(raw: string): string {
   let s = ' ' + raw.trim() + ' ';
   const subs: [RegExp, string][] = [
-    [/\s(cra|cr|kra|kr|carr)\.?(?=[\s\d#])/gi, ' Carrera'],
-    [/\s(cll|cl|cle)\.?(?=[\s\d#])/gi, ' Calle'],
-    [/\s(av|avda)\.?(?=[\s\d#])/gi, ' Avenida'],
-    [/\s(dg|diag)\.?(?=[\s\d#])/gi, ' Diagonal'],
-    [/\s(tv|transv|trans)\.?(?=[\s\d#])/gi, ' Transversal'],
-    [/\s(no|nro|num)\.?(?=[\s\d#])/gi, ' #'],
+    [/\s(cra|cr|kra|kr|carr|carrea)\.? (?=[\s\d#])/gi, ' Carrera '],
+    [/\s(cll|cl|cle)\.? (?=[\s\d#])/gi, ' Calle '],
+    [/\s(av|avda)\.? (?=[\s\d#])/gi, ' Avenida '],
+    [/\s(dg|diag)\.? (?=[\s\d#])/gi, ' Diagonal '],
+    [/\s(tv|transv|trans)\.? (?=[\s\d#])/gi, ' Transversal '],
+    [/\s(no|nro|num)\.? (?=[\s\d#])/gi, ' # '],
   ];
   for (const [re, rep] of subs) s = s.replace(re, rep);
-  // "#11A09" / "# 11A-09" → "# 11A-09" (insert dash between cross-street number and house number)
+  s = s.replace(/(Carrera|Calle|Avenida|Diagonal|Transversal)\s+(\d+[a-zA-Z]{0,2})\s+(\d+)\s+(\d+)/gi, '$1 $2 # $3-$4');
   s = s.replace(/#\s*(\d+[a-zA-Z]?)\s*[-–]?\s*(\d+)/g, '# $1-$2');
+  s = s.replace(/#\s*(\d+[a-zA-Z]?)\s+(\d+)/g, '# $1-$2');
   return s.replace(/\s+/g, ' ').trim();
 }
 
 // Parse "Carrera 44 # 11A-09" → main street + implied cross street (Calle 11A)
+// Handle both the standard form and the common shorthand that omits the dash: "#11A09".
 function parseColombianAddress(normalized: string): { main: string; cross: string; plate: string } | null {
-  const m = normalized.match(/(Carrera|Calle|Avenida|Diagonal|Transversal)\s+(\d+[a-zA-Z]{0,2})\s*(bis)?\s*#\s*(\d+[a-zA-Z]{0,2})\s*-\s*(\d+)/i);
-  if (!m) return null;
-  const [, type, num, bis, crossNum, house] = m;
-  const t = type.toLowerCase();
-  // In Colombian nomenclature, Carreras cross Calles and vice versa
-  const crossType = (t === 'carrera' || t === 'transversal') ? 'Calle' : 'Carrera';
-  const mainName = bis ? `${type} ${num} Bis` : `${type} ${num}`;
-  return {
-    main: mainName,
-    cross: `${crossType} ${crossNum}`,
-    plate: `${mainName} # ${crossNum}-${house}`,
-  };
+  const patterns = [
+    /(Carrera|Calle|Avenida|Diagonal|Transversal)\s+(\d+[a-zA-Z]{0,2})\s*(bis)?\s*#\s*(\d+[a-zA-Z]{0,2})\s*-\s*(\d+)/i,
+    /(Carrera|Calle|Avenida|Diagonal|Transversal)\s+(\d+[a-zA-Z]{0,2})\s*(bis)?\s*#\s*(\d+[a-zA-Z]{0,2})(\d+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const m = normalized.match(pattern);
+    if (!m) continue;
+    const [, type, num, bis, crossNum, house] = m;
+    const t = type.toLowerCase();
+    // In Colombian nomenclature, Carreras cross Calles and vice versa.
+    const crossType = (t === 'carrera' || t === 'transversal') ? 'Calle' : 'Carrera';
+    const mainName = bis ? `${type} ${num} Bis` : `${type} ${num}`;
+    return {
+      main: mainName,
+      cross: `${crossType} ${crossNum}`,
+      plate: `${mainName} # ${crossNum}-${house}`,
+    };
+  }
+
+  return null;
 }
 
-async function nominatimSearch(params: string, limit = 6): Promise<any[]> {
+async function nominatimSearch(params: string, limit = 6, signal?: AbortSignal): Promise<any[]> {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+
+  const timer = setTimeout(() => controller.abort(), NOMINATIM_TIMEOUT_MS);
+
   try {
     const res = await fetch(
       `${NOMINATIM}/search?format=json&limit=${limit}&countrycodes=co&accept-language=es&${params}`,
-      { headers: UA },
+      { headers: UA, signal: controller.signal },
     );
     const data = await res.json();
     return Array.isArray(data) ? data : [];
   } catch {
     return [];
+  } finally {
+    if (signal) signal.removeEventListener('abort', onAbort);
+    clearTimeout(timer);
   }
 }
 
+function normalizeCityName(city: string | null): string | null {
+  if (!city) return null;
+  const cleaned = city
+    .replace(/^(perímetro\s+urbano|perimetro\s+urbano|urbano\s+|area\s+urbana\s+)/gi, '')
+    .replace(/^\s*[-,\s]+|[-,\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned || null;
+}
+
+function normalizeNeighborhoodName(raw: string | null): string | null {
+  if (!raw) return null;
+  const cleaned = raw
+    .replace(/^(barrio|vereda|urbanización|urbanizacion|sector|asentamiento|corregimiento)\s+/i, '')
+    .replace(/^(perímetro\s+urbano|perimetro\s+urbano|urbano\s+)/i, '')
+    .replace(/^\s*[-,\s]+|[-,\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned || null;
+}
+
+function pickNeighborhoodFromDisplayName(displayName: string | null): string | null {
+  const parts = (displayName ?? '').split(',').map(part => part.trim()).filter(Boolean);
+  const generic = /^(colombia|departamento|municipio|localidad|ciudad|comuna|upz|rap|caldas|antioquia|bogotá|bogota|manizales|medellín|medellin|cundinamarca|perímetro urbano|perimetro urbano|zona)$/i;
+
+  for (const part of parts) {
+    const cleaned = normalizeNeighborhoodName(part);
+    if (!cleaned || generic.test(cleaned)) continue;
+    if (/^(calle|carrera|avenida|av|kra|cra|cll|tv|transversal|diagonal|#)/i.test(cleaned)) continue;
+    if (/\d/.test(cleaned)) continue;
+    return cleaned;
+  }
+
+  return null;
+}
+
+function formatExactPlateAddress(raw: string, city: string | null, displayName?: string | null): string {
+  const safeNeighborhood = pickNeighborhoodFromDisplayName(displayName ?? null);
+  const normalized = normalizeAddress(raw);
+  const preserveHyphen =
+    /#\s*\d+[a-zA-Z]?\s*[-–]\s*\d+/i.test(raw) ||
+    /#\s*\d+\s+\d+/i.test(raw) ||
+    /\b\d+\s+\d+\s+\d+\b/.test(raw) ||
+    /\b\d+\s+\d+\s*-\s*\d+\b/.test(raw);
+  const formatted = normalized
+    .replace(/\s*#\s*/g, ' #')
+    .replace(/#\s*(\d+)([a-zA-Z]?)(?:[-–])?(\d+)/gi, (_, first: string, letter: string, last: string) => {
+      const suffix = (letter || '').toLowerCase();
+      return preserveHyphen ? `#${first}${suffix}-${last}` : `#${first}${suffix}${last}`;
+    })
+    .replace(/(\d+)([a-zA-Z])(?=\s|$|#)/g, (_, num: string, letter: string) => `${num}${letter.toLowerCase()}`)
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const exact = safeNeighborhood ? `${formatted}, ${safeNeighborhood}` : formatted;
+  return exact.replace(/\s+,/g, ',').trim();
+}
+
+function formatAddressWithNeighborhood(displayName: string, fallback?: string): string {
+  const parts = (displayName ?? '')
+    .split(',')
+    .map(part => part.trim())
+    .filter(Boolean);
+
+  if (parts.length === 0) return fallback ?? '';
+
+  const neighborhood = pickNeighborhoodFromDisplayName(displayName) || parts.find((part) => /^(barrio|vereda|urbanización|urbanizacion|sector|asentamiento|corregimiento)\b/i.test(part));
+  const meaningful = parts.filter((part) => !/^(comuna|localidad|municipio|distrito|departamento|upz|rap|colombia|perímetro urbano|perimetro urbano|ciudad|bogotá|bogota|medellín|medellin)$/i.test(part));
+
+  const base = meaningful.slice(0, 4).join(', ').trim();
+  if (neighborhood && !base.toLowerCase().includes(neighborhood.toLowerCase())) {
+    return `${base}, ${normalizeNeighborhoodName(neighborhood) || neighborhood}`.trim();
+  }
+
+  return base || fallback || parts.slice(0, 4).join(', ');
+}
+
 function toResult(r: any): SearchResult {
+  const displayName = (r.display_name as string) ?? '';
   return {
     lat: parseFloat(r.lat),
     lng: parseFloat(r.lon),
-    address: (r.display_name as string).split(',').slice(0, 4).join(',').trim(),
+    address: formatAddressWithNeighborhood(displayName, displayName.split(',').slice(0, 4).join(',').trim()),
   };
 }
 
@@ -157,72 +264,151 @@ async function searchAddress(
   query: string,
   near: { lat: number; lng: number } | null,
   city: string | null,
+  signal?: AbortSignal,
 ): Promise<SearchResult[]> {
+  if (signal?.aborted) return [];
+
   const normalized = normalizeAddress(query);
+  const cacheKey = `${normalized}|${near ? `${near.lat.toFixed(4)}:${near.lng.toFixed(4)}` : 'global'}|${city ?? ''}`;
+  const cached = geocodeCache.get(cacheKey);
+  if (cached) return cached;
+
+  if (normalized.length < 3) {
+    geocodeCache.set(cacheKey, []);
+    return [];
+  }
+
   const parsed = parseColombianAddress(normalized);
   const useCity = !queryMentionsCity(normalized, city) ? city : null;
   const fullQuery = useCity ? `${normalized}, ${useCity}` : normalized;
+  const exactDisplay = parsed ? formatExactPlateAddress(normalized, useCity || city || null, null) : null;
 
-  // 1) Direct search (may hit an exact house number if mapped)
   let viewbox = '';
   if (near) {
-    const d = 0.55; // bias (not restrict) toward ~60 km around the user
+    const d = 0.55;
     viewbox = `&viewbox=${near.lng - d},${near.lat + d},${near.lng + d},${near.lat - d}`;
   }
-  let direct = await nominatimSearch(`q=${encodeURIComponent(fullQuery)}${viewbox}`);
-  // POI names (e.g. "parque lleras") often fail with an appended city — retry without it,
-  // first restricted to the user's area, then country-wide
+
+  let direct = await nominatimSearch(`q=${encodeURIComponent(fullQuery)}${viewbox}`, 5, signal);
+  if (signal?.aborted) return [];
+
   if (direct.length === 0 && viewbox) {
-    direct = await nominatimSearch(`q=${encodeURIComponent(normalized)}${viewbox}&bounded=1`);
-  }
-  if (direct.length === 0 && useCity) {
-    direct = await nominatimSearch(`q=${encodeURIComponent(normalized)}${viewbox}`);
+    direct = await nominatimSearch(`q=${encodeURIComponent(normalized)}${viewbox}&bounded=1`, 5, signal);
+    if (signal?.aborted) return [];
   }
 
-  // Exact building/house matches win
-  const exact = direct.filter((r: any) => r.type === 'house' || r.class === 'building' || r.addresstype === 'house');
-  if (exact.length > 0) {
-    const results = exact.map(toResult);
+  if (direct.length === 0 && useCity) {
+    direct = await nominatimSearch(`q=${encodeURIComponent(normalized)}${viewbox}`, 5, signal);
+    if (signal?.aborted) return [];
+  }
+
+  if (direct.length > 0) {
+    const exact = direct.filter((r: any) => r.type === 'house' || r.class === 'building' || r.addresstype === 'house');
+    const results = exact.length > 0 ? exact.map(toResult) : direct.map(toResult);
     if (near) results.sort((a, b) => haversine(near.lat, near.lng, a.lat, a.lng) - haversine(near.lat, near.lng, b.lat, b.lng));
+    const isExactPlateQuery = /#\s*\d+[a-zA-Z]?(?:\s*-\s*\d+)?/i.test(normalized);
+    if (parsed && isExactPlateQuery && exactDisplay) {
+      const intersectionCandidates = [
+        `${parsed.main} ${parsed.cross}${useCity ? `, ${useCity}` : ''}`,
+        `${parsed.main}${useCity ? `, ${useCity}` : ''}`,
+      ];
+
+      for (const candidate of intersectionCandidates) {
+        const intersection = await nominatimSearch(`q=${encodeURIComponent(candidate)}${viewbox}&bounded=1`, 4, signal);
+        if (signal?.aborted) return [];
+        if (intersection.length > 0) {
+          const intersectionResults = intersection.map(toResult).slice(0, 3);
+          intersectionResults.forEach((result) => {
+            const display = result.address || '';
+            result.address = formatExactPlateAddress(normalized, useCity || city || null, display);
+          });
+          geocodeCache.set(cacheKey, intersectionResults);
+          return intersectionResults;
+        }
+      }
+
+      results.forEach((result) => {
+        const display = result.address || '';
+        result.address = formatExactPlateAddress(normalized, useCity || city || null, display);
+      });
+    }
+    geocodeCache.set(cacheKey, results);
     return results;
   }
 
-  // 2) Colombian plate: approximate the intersection of the two streets.
-  // City scope: prefer the city the user typed (after a comma), else the GPS city.
-  if (parsed) {
+  const isStreetLikeQuery = /\b(calle|carrera|av|avda|avenida|transversal|diagonal|kr|cra|cll|tv)\b|\d/.test(normalized.toLowerCase());
+  const isExactPlateQuery = /#\s*\d+[a-zA-Z]?(?:\s*-\s*\d+)?/i.test(normalized);
+  if (parsed && isStreetLikeQuery && normalized.length >= 6) {
     const typedCity = /,/.test(query) ? query.split(',').pop()!.trim() : null;
     const cityParam = typedCity || city || '';
-    const cityQ = cityParam ? `&city=${encodeURIComponent(cityParam)}` : '';
-    if (cityQ) {
-      const [mainSegs, crossSegs] = await Promise.all([
-        nominatimSearch(`street=${encodeURIComponent(parsed.main)}${cityQ}`, 20),
-        nominatimSearch(`street=${encodeURIComponent(parsed.cross)}${cityQ}`, 20),
-      ]);
-      let best: { d: number; a: any; b: any } | null = null;
-      for (const a of mainSegs) {
-        for (const b of crossSegs) {
-          const d = haversine(parseFloat(a.lat), parseFloat(a.lon), parseFloat(b.lat), parseFloat(b.lon));
-          if (!best || d < best.d) best = { d, a, b };
+
+    if (isExactPlateQuery) {
+      const plateWithoutHyphen = parsed.plate.replace(/#\s*([A-Za-z0-9]+)-([A-Za-z0-9]+)/i, '# $1$2');
+      const exactDisplay = formatExactPlateAddress(normalized, cityParam || null, null);
+      const exactCandidates = [
+        `${parsed.plate}${cityParam ? `, ${cityParam}` : ''}`,
+        `${plateWithoutHyphen}${cityParam ? `, ${cityParam}` : ''}`,
+        `${parsed.main} ${parsed.cross}${cityParam ? `, ${cityParam}` : ''}`,
+        `${parsed.main}${cityParam ? `, ${cityParam}` : ''}`,
+      ];
+
+      for (const candidate of exactCandidates) {
+        const single = await nominatimSearch(`q=${encodeURIComponent(candidate)}${viewbox}&bounded=1`, 5, signal);
+        if (signal?.aborted) return [];
+        if (single.length > 0) {
+          const results = single.map(toResult).slice(0, 4);
+          results.forEach((result) => {
+            const display = result.address || '';
+            result.address = formatExactPlateAddress(normalized, cityParam || null, display);
+          });
+          geocodeCache.set(cacheKey, results);
+          return results;
         }
       }
-      // Only trust the pair when the segments are close enough to plausibly intersect
-      if (best && best.d < 1.5) {
-        const lat = (parseFloat(best.a.lat) + parseFloat(best.b.lat)) / 2;
-        const lng = (parseFloat(best.a.lon) + parseFloat(best.b.lon)) / 2;
-        // Barrio/city come from the main street segment's display name (skip the street part)
-        const context = (best.a.display_name as string).split(',').slice(1, 4).join(',').trim();
-        const approx: SearchResult = { lat, lng, address: `${parsed.plate} (aprox.), ${context}` };
-        // Keep street matches as alternative options below the approximation
-        const others = direct.map(toResult);
-        return [approx, ...others.slice(0, 4)];
+
+      if (cityParam) {
+        const streetResults = await nominatimSearch(`street=${encodeURIComponent(parsed.main)}&city=${encodeURIComponent(cityParam)}`, 6, signal);
+        if (signal?.aborted) return [];
+        if (streetResults.length > 0) {
+          const results = streetResults.map(toResult).slice(0, 4);
+          results.forEach((result) => {
+            const display = result.address || '';
+            result.address = formatExactPlateAddress(normalized, cityParam || null, display);
+          });
+          geocodeCache.set(cacheKey, results);
+          return results;
+        }
+      }
+
+      const fallback = {
+        lat: near?.lat ?? BOGOTA.latitude,
+        lng: near?.lng ?? BOGOTA.longitude,
+        address: formatExactPlateAddress(normalized, cityParam || city || null, null),
+      };
+      geocodeCache.set(cacheKey, [fallback]);
+      return [fallback];
+    }
+
+    if (cityParam) {
+      const streetQuery = `street=${encodeURIComponent(parsed.main)}&city=${encodeURIComponent(cityParam)}`;
+      const streetResults = await nominatimSearch(streetQuery, 6, signal);
+      if (signal?.aborted) return [];
+      if (streetResults.length > 0) {
+        const results = streetResults.map(toResult).slice(0, 4);
+        if (parsed) {
+          results.forEach((result) => {
+            const displayName = result.address || '';
+            result.address = formatAddressWithNeighborhood(displayName, normalized);
+          });
+        }
+        geocodeCache.set(cacheKey, results);
+        return results;
       }
     }
   }
 
-  // 3) Fallback: street/place matches from the direct search
-  const results = direct.map(toResult);
-  if (near) results.sort((a, b) => haversine(near.lat, near.lng, a.lat, a.lng) - haversine(near.lat, near.lng, b.lat, b.lng));
-  return results;
+  geocodeCache.set(cacheKey, []);
+  return [];
 }
 
 // Reverse geocode: returns short address plus the detected city/municipality
@@ -234,9 +420,13 @@ async function reverseGeocodeFull(lat: number, lng: number): Promise<{ address: 
     );
     const data = await res.json();
     const a = data.address ?? {};
-    const city = a.city ?? a.town ?? a.municipality ?? a.village ?? null;
+    const displayName = (data.display_name as string) ?? '';
+    const city = normalizeCityName(
+      a.city ?? a.town ?? a.municipality ?? a.village ?? null,
+    );
+
     if (data.display_name) {
-      const parts = (data.display_name as string).split(',');
+      const parts = displayName.split(',');
       return { address: parts.slice(0, 3).join(',').trim(), city };
     }
   } catch { /* ignore */ }
@@ -250,6 +440,79 @@ function haversine(lat1: number, lng1: number, lat2: number, lng2: number): numb
   const a = Math.sin(dLat / 2) ** 2 +
     Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function buildNearbyTaxis(center: { lat: number; lng: number } | null, count = 5) {
+  if (!center) return [];
+  const factories = [
+    { lat: 0.0032, lng: -0.0041 }, { lat: -0.0038, lng: 0.0045 }, { lat: 0.0054, lng: 0.0032 },
+    { lat: -0.0061, lng: -0.0039 }, { lat: 0.0016, lng: 0.0055 }, { lat: -0.0053, lng: 0.0026 },
+  ];
+  return Array.from({ length: count }, (_, index) => {
+    const offset = factories[index % factories.length];
+    const jitterLat = offset.lat + ((index % 2 === 0 ? 1 : -1) * (index + 1) * 0.0008);
+    const jitterLng = offset.lng + ((index % 3 === 0 ? 1 : -1) * (index + 2) * 0.0006);
+    return {
+      id: `taxi-${index}`,
+      lat: center.lat + jitterLat,
+      lng: center.lng + jitterLng,
+      angle: (index * 32) % 360,
+    };
+  });
+}
+
+function numberToWords(value: number): string {
+  const ones = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
+  const teens = ['diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciséis', 'diecisiete', 'dieciocho', 'diecinueve'];
+  const tens = ['', '', 'veinte', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+
+  if (value < 10) return ones[value];
+  if (value < 20) return teens[value - 10];
+  if (value < 100) {
+    const ten = Math.floor(value / 10);
+    const rest = value % 10;
+    const head = tens[ten];
+    return rest === 0 ? head : `${head} y ${ones[rest]}`;
+  }
+  if (value < 1000) {
+    const hundreds = Math.floor(value / 100);
+    const rest = value % 100;
+    const prefix = hundreds === 1 ? 'cien' : `${ones[hundreds]}cientos`;
+    return rest === 0 ? prefix : `${prefix} ${numberToWords(rest)}`;
+  }
+  return String(value);
+}
+
+function toSpeechAddress(address: string): string {
+  const raw = (address || 'Ubicación de origen').replace(/\s+/g, ' ').trim();
+  if (!raw || raw.toLowerCase() === 'ubicación de origen') return 'ubicación cercana';
+
+  let text = raw
+    .replace(/\b(cra|carrea|carrera)\b/gi, 'carrera')
+    .replace(/\b(av|avenida)\b/gi, 'avenida')
+    .replace(/\b(cll|calle)\b/gi, 'calle')
+    .replace(/\b(tv|transversal)\b/gi, 'transversal')
+    .replace(/\b(dg|diagonal)\b/gi, 'diagonal')
+    .replace(/\s*#\s*/gi, ' número ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  text = text.replace(/(\d+)([a-zA-Z])(?=\s|$|,)/g, (_, num: string, letter: string) => {
+    const parsed = Number(num);
+    return `${numberToWords(parsed)} ${letter.toUpperCase()}`;
+  });
+
+  text = text.replace(/número\s+(\d+)([a-zA-Z])\s*(\d+)/gi, (_, n1: string, letter: string, n2: string) => {
+    const first = numberToWords(Number(n1));
+    const second = numberToWords(Number(n2));
+    return `número ${first} ${letter.toUpperCase()} ${second}`;
+  });
+
+  text = text.replace(/número\s+(\d+)/gi, (_, num: string) => `número ${numberToWords(Number(num))}`);
+  text = text.replace(/\b(\d+)\b/g, (_, num: string) => numberToWords(Number(num)));
+  text = text.replace(/\s*,\s*/g, ', ');
+
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 // ─── Passenger Home ───────────────────────────────────────────────────────
@@ -276,11 +539,13 @@ function PassengerHome() {
   // Address search state
   const [userLoc, setUserLoc] = useState<{ lat: number; lng: number } | null>(null);
   const [userCity, setUserCity] = useState<string | null>(null);
+  const [nearbyTaxis, setNearbyTaxis] = useState<Array<{ id: string; lat: number; lng: number; angle: number }>>([]);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [pending, setPending] = useState<Pin | null>(null); // candidate awaiting confirmation
   const searchReqId = useRef(0);
+  const searchControllerRef = useRef<AbortController | null>(null);
   const selectSessionId = useRef(0);
 
   const createTrip = useCreateTrip();
@@ -317,22 +582,36 @@ function PassengerHome() {
     })();
   }, []);
 
+  useEffect(() => {
+    const focusPoint = pending ?? origin ?? (userLoc ? { lat: userLoc.lat, lng: userLoc.lng, address: 'Mi ubicación' } : null);
+    const center = focusPoint ? { lat: focusPoint.lat, lng: focusPoint.lng } : null;
+    setNearbyTaxis(buildNearbyTaxis(center, focusPoint ? 5 : 3));
+  }, [pending, origin, userLoc, step]);
+
   // Debounced address search while typing (guarded against stale responses)
   useEffect(() => {
     if (step !== 'selectOrigin' && step !== 'selectDest') return;
     if (pending) return; // a candidate was chosen; don't re-search until the user edits the text
-    if (query.trim().length < 3) { setResults([]); setIsSearching(false); return; }
+    const trimmed = query.trim();
+    if (trimmed.length < 2) { setResults([]); setIsSearching(false); return; }
+
     const reqId = ++searchReqId.current;
+    const controller = new AbortController();
+    if (searchControllerRef.current) searchControllerRef.current.abort();
+    searchControllerRef.current = controller;
     if (geocodeTimer.current) clearTimeout(geocodeTimer.current);
+
     geocodeTimer.current = setTimeout(async () => {
       setIsSearching(true);
-      const found = await searchAddress(query.trim(), userLoc, userCity);
-      if (reqId !== searchReqId.current) return; // a newer search/step superseded this one
+      const found = await searchAddress(trimmed, userLoc, userCity, controller.signal);
+      if (controller.signal.aborted || reqId !== searchReqId.current) return;
       setResults(found);
       setIsSearching(false);
-    }, 700);
+    }, 100);
+
     return () => {
-      searchReqId.current++; // invalidate in-flight response
+      searchReqId.current++;
+      if (searchControllerRef.current) searchControllerRef.current.abort();
       if (geocodeTimer.current) clearTimeout(geocodeTimer.current);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -414,8 +693,14 @@ function PassengerHome() {
   };
 
   const skipDestination = () => {
-    // User chose to omit destination: proceed to confirm step without a dest.
-    setDest(null);
+    if (!origin) return;
+    // Preserve a valid destination object so the UI can detect that the destination is intentionally omitted
+    // and drivers see "Destino sin especificar" instead of a null/invalid destination.
+    setDest({
+      lat: origin.lat,
+      lng: origin.lng,
+      address: origin.address?.trim() || 'Ubicación de origen',
+    });
     setPending(null);
     setQuery('');
     setResults([]);
@@ -425,18 +710,27 @@ function PassengerHome() {
   const requestTaxi = async () => {
     if (!origin) return;
     setStep('searching');
+
+    const tripPayload: Record<string, any> = {
+      originLat: origin.lat,
+      originLng: origin.lng,
+      originAddress: origin.address?.trim() || 'Ubicación de origen',
+      vehicleType: 'taxi',
+      paymentMethod: effectivePaymentMethod,
+    };
+
     try {
       const normalizedOriginAddress = origin.address?.trim() || 'Ubicación de origen';
       const normalizedDestinationAddress = typeof dest?.address === 'string' ? dest.address.trim() : '';
-      const hasDestination = !!dest && Number.isFinite(dest.lat) && Number.isFinite(dest.lng) && normalizedDestinationAddress.length > 0;
+      const sameAsOrigin = !!dest && Number.isFinite(dest.lat) && Number.isFinite(dest.lng)
+        && Number(dest.lat) === Number(origin.lat)
+        && Number(dest.lng) === Number(origin.lng);
+      const hasDestination = !!dest && Number.isFinite(dest.lat) && Number.isFinite(dest.lng)
+        && normalizedDestinationAddress.length > 0
+        && !sameAsOrigin;
+      const fallbackDestinationAddress = normalizedDestinationAddress || normalizedOriginAddress || 'Ubicación de origen';
 
-      const tripPayload: Record<string, any> = {
-        originLat: origin.lat,
-        originLng: origin.lng,
-        originAddress: normalizedOriginAddress,
-        vehicleType: 'taxi',
-        paymentMethod: effectivePaymentMethod,
-      };
+      tripPayload.originAddress = normalizedOriginAddress;
 
       if (hasDestination) {
         tripPayload.destinationLat = Number(dest!.lat);
@@ -445,15 +739,15 @@ function PassengerHome() {
         tripPayload.estimatedPrice = Number(estimatedPrice) || 0;
         tripPayload.destinationPending = false;
       } else {
-        // When user omits destination, send the origin values as destination (do NOT send nulls)
+        // When the destination is intentionally omitted or equal to the origin,
+        // we keep the same origin values in destination to avoid nulls and let the UI show "Destino sin especificar".
         tripPayload.destinationLat = Number(origin.lat);
         tripPayload.destinationLng = Number(origin.lng);
-        tripPayload.destinationAddress = normalizedOriginAddress;
+        tripPayload.destinationAddress = fallbackDestinationAddress;
         tripPayload.destinationPending = true;
         tripPayload.estimatedPrice = 0;
       }
 
-      // Sanitize payload: remove any accidental null/undefined and ensure numeric fields are numbers
       for (const k of Object.keys(tripPayload)) {
         const v = (tripPayload as any)[k];
         if (v === null || v === undefined) {
@@ -465,48 +759,43 @@ function PassengerHome() {
         }
       }
 
-      // Debug log: payload and base URL so network issues can be diagnosed in adb logcat
       try {
         console.log('createTrip payload:', JSON.stringify(tripPayload));
       } catch (e) { console.log('createTrip payload (unserializable)', e); }
       console.log('API base URL:', getApiUrl());
 
-      try {
-        const trip = await createTrip.mutateAsync({ data: tripPayload as any });
-        setActiveTripId(trip.id);
-        joinTrip(trip.id);
-      } catch (err: any) {
-        // Log full error for diagnostics (will appear in adb logcat)
-        console.error('createTrip error:', err);
+      const trip = await createTrip.mutateAsync({ data: tripPayload as any });
+      setActiveTripId(trip.id);
+      joinTrip(trip.id);
+    } catch (err: any) {
+      console.error('createTrip error:', err);
 
-        // If it's a network failure from React Native fetch, attempt a direct fetch to surface more info
-        const msg = err?.data?.error ?? err?.message ?? (typeof err === 'string' ? err : null);
-        if (msg && typeof msg === 'string' && msg.toLowerCase().includes('network request failed')) {
-          try {
-            const base = getApiUrl();
-            console.log('Retrying createTrip with direct fetch to', `${base}/trips`);
-            const token = await AsyncStorage.getItem('auth_token');
-            const res = await fetch(`${base}/trips`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `****** },
-              body: JSON.stringify(tripPayload),
-            });
-            const text = await res.text();
-            console.log('Direct fetch response status:', res.status, 'body:', text);
-            if (!res.ok) throw new Error(`Direct fetch failed: ${res.status} ${text}`);
-            const json = JSON.parse(text || '{}');
-            setActiveTripId(json.id);
-            joinTrip(json.id);
-            return;
-          } catch (e2: any) {
-            console.error('Direct fetch createTrip error:', e2);
-          }
+      const msg = err?.data?.error ?? err?.message ?? (typeof err === 'string' ? err : null);
+      if (msg && typeof msg === 'string' && msg.toLowerCase().includes('network request failed')) {
+        try {
+          const base = getApiUrl();
+          console.log('Retrying createTrip with direct fetch to', `${base}/trips`);
+          const token = await AsyncStorage.getItem('auth_token');
+          const res = await fetch(`${base}/trips`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '', },
+            body: JSON.stringify(tripPayload),
+          });
+          const text = await res.text();
+          console.log('Direct fetch response status:', res.status, 'body:', text);
+          if (!res.ok) throw new Error(`Direct fetch failed: ${res.status} ${text}`);
+          const json = JSON.parse(text || '{}');
+          setActiveTripId(json.id);
+          joinTrip(json.id);
+          return;
+        } catch (e2: any) {
+          console.error('Direct fetch createTrip error:', e2);
         }
-
-        setStep('confirm');
-        const fallbackMsg = err?.data?.error ?? err?.message ?? (typeof err === 'string' ? err : 'No se pudo solicitar el taxi.');
-        Alert.alert('Error', fallbackMsg);
       }
+
+      setStep('confirm');
+      const fallbackMsg = err?.data?.error ?? err?.message ?? (typeof err === 'string' ? err : 'No se pudo solicitar el taxi.');
+      Alert.alert('Error', fallbackMsg);
     }
   };
 
@@ -517,7 +806,7 @@ function PassengerHome() {
         const base = getApiUrl();
         await fetch(`${base}/trips/${activeTripId}/status`, {
           method: 'PATCH',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          headers: { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '', },
           body: JSON.stringify({ status: 'cancelled' }),
         });
         leaveTrip(activeTripId);
@@ -556,6 +845,15 @@ function PassengerHome() {
         pitchEnabled={false}
         rotateEnabled={false}
       >
+        {nearbyTaxis.length > 0 && (
+          nearbyTaxis.map((taxi) => (
+            <Marker key={taxi.id} coordinate={{ latitude: taxi.lat, longitude: taxi.lng }} title="Taxi cercano">
+              <View style={{ transform: [{ rotate: `${taxi.angle}deg` }] }}>
+                <Text style={{ fontSize: 18 }}>🚕</Text>
+              </View>
+            </Marker>
+          ))
+        )}
         {origin && step !== 'selectOrigin' && (
           <Marker coordinate={{ latitude: origin.lat, longitude: origin.lng }} title="Origen">
             <View style={[styles.markerDot, { backgroundColor: colors.light.primary }]} />
@@ -933,10 +1231,49 @@ function DriverHome() {
   const [requests, setRequests] = useState<any[]>([]);
   const [acceptingId, setAcceptingId] = useState<number | null>(null);
   const [panicPending, setPanicPending] = useState(false);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setRequests(prev => prev.filter(req => {
+        const deadline = Number(req.expiresAt ?? Date.now());
+        return deadline > Date.now() + 250;
+      }));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
   const panicAnim = useRef(new Animated.Value(1)).current;
   const updateStatus = useUpdateDriverStatus();
   const updateLocation = useUpdateDriverLocation();
   const acceptTrip = useUpdateTripStatus();
+
+  const announceTripRequest = useCallback((trip: any) => {
+    try {
+      const originAddress = (trip?.originAddress || 'Ubicación de origen')
+        .replace(/\s+/g, ' ')
+        .replace(/,\s*$/, '')
+        .trim();
+      const originLabel = toSpeechAddress(originAddress);
+
+      const paymentMethodLabel = (() => {
+        const method = (trip?.paymentMethod || 'cash').toString().toLowerCase();
+        if (method === 'cash') return 'Efectivo';
+        if (method === 'nequi') return 'Nequi';
+        if (method === 'daviplata') return 'Daviplata';
+        if (method === 'breve') return 'Breve';
+        return method || 'Efectivo';
+      })();
+
+      const message = `Solicitan taxi desde la dirección ${originLabel}. Pago: ${paymentMethodLabel}`;
+      Speech.stop();
+      Speech.speak(message, {
+        language: 'es-ES',
+        rate: 1.15,
+        pitch: 1.0,
+      });
+    } catch {
+      // Ignore TTS failures in unsupported environments.
+    }
+  }, []);
 
   // On mount, force the server state to offline so previous sessions don't linger
   useEffect(() => {
@@ -969,11 +1306,30 @@ function DriverHome() {
   useEffect(() => {
     if (!socket || !isOnline) return;
     const handler = (trip: any) => {
-      setRequests(prev => prev.find(r => r.id === trip.id) ? prev : [trip, ...prev].slice(0, 3));
+      setRequests(prev => {
+        const next = [...prev];
+        const index = next.findIndex(r => r.id === trip.id);
+        const enriched = { ...trip, expiresAt: Date.now() + 10_000 };
+        if (index >= 0) {
+          next[index] = enriched;
+        } else {
+          next.unshift(enriched);
+        }
+        return next.slice(0, 4);
+      });
+      announceTripRequest(trip);
+    };
+    const onStatusUpdated = (trip: any) => {
+      if (!trip || trip.status === 'pending') return;
+      setRequests(prev => prev.filter(r => r.id !== trip.id));
     };
     socket.on('trip:new_request', handler);
-    return () => { socket.off('trip:new_request', handler); };
-  }, [socket, isOnline]);
+    socket.on('trip_status_updated', onStatusUpdated);
+    return () => {
+      socket.off('trip:new_request', handler);
+      socket.off('trip_status_updated', onStatusUpdated);
+    };
+  }, [socket, isOnline, announceTripRequest]);
 
   // Listen for forced-offline event when subscription expires mid-session
   useEffect(() => {
@@ -1085,7 +1441,7 @@ function DriverHome() {
               const base = getApiUrl();
               const res = await fetch(`${base}/drivers/panic`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                headers: { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '', },
                 body: JSON.stringify({ message: 'Necesito ayuda urgente' }),
               });
               const json = await res.json();
@@ -1150,6 +1506,10 @@ function DriverHome() {
               <View style={styles.requestTop}>
                 <Feather name="bell" size={14} color={colors.light.accent} />
                 <Text style={styles.requestTitle}>Nueva solicitud de taxi</Text>
+                <View style={styles.countdownPill}>
+                  <Feather name="clock" size={12} color={colors.light.accent} />
+                  <Text style={styles.countdownText}>{Math.max(0, Math.ceil((Number(req.expiresAt ?? Date.now()) - Date.now()) / 1000))}s</Text>
+                </View>
                 <TouchableOpacity onPress={() => setRequests(p => p.filter(r => r.id !== req.id))}>
                   <Feather name="x" size={14} color={colors.light.mutedForeground} />
                 </TouchableOpacity>
@@ -1235,7 +1595,6 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.light.border,
     paddingHorizontal: 16, paddingVertical: 12,
   },
-  topLabelText: { fontSize: 13, fontWeight: '600', color: colors.light.foreground, fontFamily: 'Inter_600SemiBold' },
   driverTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   toggleBtn: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 16 },
   toggleBtnOn: { backgroundColor: colors.light.destructive + 'CC' },
@@ -1366,6 +1725,13 @@ const styles = StyleSheet.create({
   },
   requestTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   requestTitle: { flex: 1, fontSize: 14, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  countdownPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: colors.light.secondary, borderRadius: 999,
+    borderWidth: 1, borderColor: colors.light.border,
+    paddingHorizontal: 8, paddingVertical: 4,
+  },
+  countdownText: { fontSize: 11, fontWeight: '700', color: colors.light.accent, fontFamily: 'Inter_700Bold' },
   reqRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   reqText: { flex: 1, fontSize: 13, color: colors.light.foreground, fontFamily: 'Inter_400Regular' },
   requestMeta: { flexDirection: 'row', alignItems: 'center', gap: 12 },

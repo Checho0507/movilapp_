@@ -33,7 +33,7 @@ interface Conversation {
 
 async function fetchConversations(token: string): Promise<Conversation[]> {
   const res = await fetch(`${BASE_URL}/conversations`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: token ? 'Bearer ' + token : '', },
   });
   if (!res.ok) throw new Error('Error al cargar conversaciones');
   return res.json();
@@ -42,7 +42,7 @@ async function fetchConversations(token: string): Promise<Conversation[]> {
 async function createSupportConversation(token: string): Promise<Conversation> {
   const res = await fetch(`${BASE_URL}/conversations`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers: { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '', },
     body: JSON.stringify({ type: 'support', subject: 'Consulta de soporte' }),
   });
   if (!res.ok) throw new Error('Error al crear conversación');

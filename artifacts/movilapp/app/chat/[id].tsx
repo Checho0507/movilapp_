@@ -40,7 +40,7 @@ interface Conversation {
 
 async function getAuthHeaders() {
   const token = await AsyncStorage.getItem('auth_token');
-  return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  return { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '', };
 }
 
 export default function ChatScreen() {
