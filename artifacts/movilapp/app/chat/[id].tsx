@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
-  FlatList, ActivityIndicator, Platform,
+  FlatList, ActivityIndicator, Platform, Alert, Image,
 } from 'react-native';
 import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, router } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '@/context/AuthContext';
 import { useSocket } from '@/context/SocketContext';
@@ -24,6 +26,7 @@ interface ConvMessage {
   senderRole: string;
   content: string;
   createdAt: string;
+  attachments?: { name: string; mimeType: string; size: number; url: string }[];
 }
 
 interface Conversation {
@@ -56,6 +59,7 @@ export default function ChatScreen() {
   const [loading, setLoading] = useState(true);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  const [attachments, setAttachments] = useState<{ name: string; mimeType: string; size: number; data: string }[]>([]);
 
   // Load conversation details + messages
   const loadAll = useCallback(async () => {
@@ -100,7 +104,7 @@ export default function ChatScreen() {
   }, [socket, convId]);
 
   const handleSend = async () => {
-    if (!text.trim() || sending) return;
+    if ((!text.trim() && !attachments.length) || sending) return;
     setSending(true);
     const content = text.trim();
     setText('');
@@ -109,11 +113,12 @@ export default function ChatScreen() {
       const res = await fetch(`${BASE_URL}/conversations/${convId}/messages`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, attachments }),
       });
       if (res.ok) {
         const msg: ConvMessage = await res.json();
         setMessages(prev => prev.find(m => m.id === msg.id) ? prev : [...prev, msg]);
+        setAttachments([]);
       }
     } catch { /* ignore */ }
     finally { setSending(false); }
@@ -148,9 +153,10 @@ export default function ChatScreen() {
               {item.senderName}
             </Text>
           )}
-          <Text style={[styles.bubbleText, mine && styles.bubbleTextMine]}>
-            {item.content}
-          </Text>
+          {item.content ? <Text style={[styles.bubbleText, mine && styles.bubbleTextMine]}>{item.content}</Text> : null}
+          {item.attachments?.map(file => file.mimeType.startsWith('image/')
+            ? <Image key={file.url} source={{ uri: `${BASE_URL}${file.url}` }} style={styles.attachmentImage} />
+            : <Text key={file.url} style={[styles.attachmentName, mine && styles.bubbleTextMine]}>{file.name}</Text>)}
           <Text style={[styles.bubbleTime, mine && styles.bubbleTimeMine]}>
             {new Date(item.createdAt).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })}
           </Text>
@@ -205,6 +211,21 @@ export default function ChatScreen() {
 
         {/* Input */}
         <View style={[styles.inputBar, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 16 : 8) }]}>
+          <TouchableOpacity style={styles.attachBtn} onPress={async () => {
+            const result = await DocumentPicker.getDocumentAsync({ type: ['image/*', 'application/pdf', 'text/plain', 'application/zip'], multiple: true, copyToCacheDirectory: true });
+            if (result.canceled) return;
+            const selected = result.assets.slice(0, 5);
+            try {
+              const next = await Promise.all(selected.map(async file => ({
+                name: file.name, mimeType: file.mimeType ?? 'application/octet-stream', size: file.size ?? 0,
+                data: `data:${file.mimeType ?? 'application/octet-stream'};base64,${await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 })}`,
+              })));
+              if (next.some(file => file.size > 8 * 1024 * 1024)) throw new Error('Archivo demasiado grande');
+              setAttachments(next);
+            } catch (error) { Alert.alert('Adjunto no válido', error instanceof Error ? error.message : 'No se pudo leer el archivo'); }
+          }}>
+            <Feather name="paperclip" size={18} color={colors.light.foreground} />
+          </TouchableOpacity>
           <TextInput
             style={styles.input}
             value={text}
@@ -215,9 +236,9 @@ export default function ChatScreen() {
             returnKeyType="default"
           />
           <TouchableOpacity
-            style={[styles.sendBtn, (!text.trim() || sending) && styles.sendBtnDisabled]}
+            style={[styles.sendBtn, (!text.trim() && !attachments.length || sending) && styles.sendBtnDisabled]}
             onPress={handleSend}
-            disabled={!text.trim() || sending}
+            disabled={(!text.trim() && !attachments.length) || sending}
           >
             {sending
               ? <ActivityIndicator size="small" color="#fff" />
@@ -316,4 +337,10 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   sendBtnDisabled: { opacity: 0.4 },
+  attachBtn: {
+    width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: colors.light.border, backgroundColor: colors.light.background,
+  },
+  attachmentImage: { width: 180, height: 120, borderRadius: 10, marginTop: 4 },
+  attachmentName: { fontSize: 13, textDecorationLine: 'underline', marginTop: 4 },
 });

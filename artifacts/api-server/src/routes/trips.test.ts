@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveTripDestination } from "./trips.js";
+import {
+  calculateEconomicalFare,
+  MIN_FARE_COP,
+  resolveTripDestination,
+  validateFare,
+} from "./trips.js";
 import { signToken, verifyToken } from "../lib/auth.js";
 
 test("signToken and verifyToken round-trip valid payloads", () => {
@@ -54,4 +59,16 @@ test("resolveTripDestination treats same-origin destination as pending but valid
   assert.equal(result.hasDestination, false);
   assert.equal(result.destinationPending, true);
   assert.equal(result.finalDestinationAddress, "Carrera 9 #9a07, Chipre");
+});
+
+test("economical fares keep the floor and round automatic values to thousands", () => {
+  assert.equal(calculateEconomicalFare(0), MIN_FARE_COP);
+  assert.equal(calculateEconomicalFare(1) % 1000, 0);
+  assert.ok(calculateEconomicalFare(10) >= MIN_FARE_COP);
+});
+
+test("negotiated fares require 500-peso increments and cannot go below the minimum", () => {
+  assert.equal(validateFare(6500, 5500), 6500);
+  assert.throws(() => validateFare(6250, 5500), /múltiplo/);
+  assert.throws(() => validateFare(5000, 5500), /no menor/);
 });

@@ -4,7 +4,7 @@ import {
   Platform, Alert, Animated, Vibration, Image, TextInput, ScrollView, Keyboard,
   KeyboardAvoidingView,
 } from 'react-native';
-import { MapView, Marker, PROVIDER_DEFAULT } from '@/lib/maps';
+import { MapView, Marker, UrlTile } from '@/lib/maps';
 import type { Region } from '@/lib/maps';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -17,12 +17,12 @@ import { useCreateTrip, useUpdateDriverStatus, useUpdateDriverLocation, useUpdat
 import { useAuth } from '@/context/AuthContext';
 import { useSocket } from '@/context/SocketContext';
 import colors from '@/constants/colors';
-import { getApiUrl } from '@/lib/api-config';
+import { getApiUrl, getMapTileUrl } from '@/lib/api-config';
 import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 
 const BOGOTA: Region = { latitude: 4.711, longitude: -74.0721, latitudeDelta: 0.06, longitudeDelta: 0.06 };
 const DRIVER_ACCEPT_RADIUS_KM = 1;
-
+const MAP_TILE_URL = getMapTileUrl();
 const PAYMENT_OPTIONS = [
   { key: 'cash', label: 'Efectivo' },
   { key: 'transfer', label: 'Transferencia' },
@@ -87,7 +87,7 @@ type Pin = { lat: number; lng: number; address: string };
 type SearchResult = { lat: number; lng: number; address: string };
 
 const NOMINATIM = 'https://nominatim.openstreetmap.org';
-const NOMINATIM_TIMEOUT_MS = 1500;
+const NOMINATIM_TIMEOUT_MS = 6000;
 const UA = { 'User-Agent': 'MovilApp/1.0' };
 const geocodeCache = new Map<string, SearchResult[]>();
 
@@ -285,7 +285,9 @@ async function searchAddress(
 
   let viewbox = '';
   if (near) {
-    const d = 0.55;
+    // Keep autocomplete candidates close to the detected city instead of
+    // allowing a similarly named street elsewhere in the country.
+    const d = 0.15;
     viewbox = `&viewbox=${near.lng - d},${near.lat + d},${near.lng + d},${near.lat - d}`;
   }
 
@@ -302,34 +304,33 @@ async function searchAddress(
     if (signal?.aborted) return [];
   }
 
+  // Nominatim may reject a narrow viewbox for Colombian plate formats. Retry
+  // globally before reporting no matches.
+  if (direct.length === 0 && viewbox) {
+    direct = await nominatimSearch(
+      `q=${encodeURIComponent(fullQuery)}`,
+      8,
+      signal,
+    );
+    if (signal?.aborted) return [];
+  }
+
   if (direct.length > 0) {
-    const exact = direct.filter((r: any) => r.type === 'house' || r.class === 'building' || r.addresstype === 'house');
-    const results = exact.length > 0 ? exact.map(toResult) : direct.map(toResult);
-    if (near) results.sort((a, b) => haversine(near.lat, near.lng, a.lat, a.lng) - haversine(near.lat, near.lng, b.lat, b.lng));
+    const exact = direct.filter((r: any) =>
+      r.type === 'house' ||
+      r.class === 'building' ||
+      r.addresstype === 'house' ||
+      Boolean(r.address?.house_number && r.address?.road),
+    );
     const isExactPlateQuery = /#\s*\d+[a-zA-Z]?(?:\s*-\s*\d+)?/i.test(normalized);
+    const results = (isExactPlateQuery && exact.length > 0 ? exact : direct).map(toResult);
+    if (near) results.sort((a, b) => haversine(near.lat, near.lng, a.lat, a.lng) - haversine(near.lat, near.lng, b.lat, b.lng));
     if (parsed && isExactPlateQuery && exactDisplay) {
-      const intersectionCandidates = [
-        `${parsed.main} ${parsed.cross}${useCity ? `, ${useCity}` : ''}`,
-        `${parsed.main}${useCity ? `, ${useCity}` : ''}`,
-      ];
-
-      for (const candidate of intersectionCandidates) {
-        const intersection = await nominatimSearch(`q=${encodeURIComponent(candidate)}${viewbox}&bounded=1`, 4, signal);
-        if (signal?.aborted) return [];
-        if (intersection.length > 0) {
-          const intersectionResults = intersection.map(toResult).slice(0, 3);
-          intersectionResults.forEach((result) => {
-            const display = result.address || '';
-            result.address = formatExactPlateAddress(normalized, useCity || city || null, display);
-          });
-          geocodeCache.set(cacheKey, intersectionResults);
-          return intersectionResults;
-        }
-      }
-
+      // Never replace a house/building result with a street intersection.
+      // The intersection can be hundreds of metres away from the actual
+      // address and was the source of incorrect barrio/pin combinations.
       results.forEach((result) => {
-        const display = result.address || '';
-        result.address = formatExactPlateAddress(normalized, useCity || city || null, display);
+        result.address = formatExactPlateAddress(normalized, useCity || city || null, result.address);
       });
     }
     geocodeCache.set(cacheKey, results);
@@ -341,53 +342,6 @@ async function searchAddress(
   if (parsed && isStreetLikeQuery && normalized.length >= 6) {
     const typedCity = /,/.test(query) ? query.split(',').pop()!.trim() : null;
     const cityParam = typedCity || city || '';
-
-    if (isExactPlateQuery) {
-      const plateWithoutHyphen = parsed.plate.replace(/#\s*([A-Za-z0-9]+)-([A-Za-z0-9]+)/i, '# $1$2');
-      const exactDisplay = formatExactPlateAddress(normalized, cityParam || null, null);
-      const exactCandidates = [
-        `${parsed.plate}${cityParam ? `, ${cityParam}` : ''}`,
-        `${plateWithoutHyphen}${cityParam ? `, ${cityParam}` : ''}`,
-        `${parsed.main} ${parsed.cross}${cityParam ? `, ${cityParam}` : ''}`,
-        `${parsed.main}${cityParam ? `, ${cityParam}` : ''}`,
-      ];
-
-      for (const candidate of exactCandidates) {
-        const single = await nominatimSearch(`q=${encodeURIComponent(candidate)}${viewbox}&bounded=1`, 5, signal);
-        if (signal?.aborted) return [];
-        if (single.length > 0) {
-          const results = single.map(toResult).slice(0, 4);
-          results.forEach((result) => {
-            const display = result.address || '';
-            result.address = formatExactPlateAddress(normalized, cityParam || null, display);
-          });
-          geocodeCache.set(cacheKey, results);
-          return results;
-        }
-      }
-
-      if (cityParam) {
-        const streetResults = await nominatimSearch(`street=${encodeURIComponent(parsed.main)}&city=${encodeURIComponent(cityParam)}`, 6, signal);
-        if (signal?.aborted) return [];
-        if (streetResults.length > 0) {
-          const results = streetResults.map(toResult).slice(0, 4);
-          results.forEach((result) => {
-            const display = result.address || '';
-            result.address = formatExactPlateAddress(normalized, cityParam || null, display);
-          });
-          geocodeCache.set(cacheKey, results);
-          return results;
-        }
-      }
-
-      const fallback = {
-        lat: near?.lat ?? BOGOTA.latitude,
-        lng: near?.lng ?? BOGOTA.longitude,
-        address: formatExactPlateAddress(normalized, cityParam || city || null, null),
-      };
-      geocodeCache.set(cacheKey, [fallback]);
-      return [fallback];
-    }
 
     if (cityParam) {
       const streetQuery = `street=${encodeURIComponent(parsed.main)}&city=${encodeURIComponent(cityParam)}`;
@@ -529,6 +483,7 @@ function PassengerHome() {
   const [origin, setOrigin] = useState<Pin | null>(null);
   const [dest, setDest] = useState<Pin | null>(null);
   const [estimatedPrice, setEstimatedPrice] = useState(0);
+  const [passengerOffer, setPassengerOffer] = useState('');
   const [distanceKm, setDistanceKm] = useState(0);
   const [activeTripId, setActiveTripId] = useState<number | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentKey>('cash');
@@ -622,7 +577,7 @@ function PassengerHome() {
     setPending({ lat: r.lat, lng: r.lng, address: r.address });
     setResults([]);
     setQuery(r.address);
-    const reg: Region = { latitude: r.lat, longitude: r.lng, latitudeDelta: 0.008, longitudeDelta: 0.008 };
+    const reg: Region = { latitude: r.lat, longitude: r.lng, latitudeDelta: 0.0025, longitudeDelta: 0.0025 };
     setRegion(reg);
     mapRef.current?.animateToRegion(reg, 500);
   };
@@ -636,7 +591,8 @@ function PassengerHome() {
     if (!origin || !dest) return;
     const km = haversine(origin.lat, origin.lng, dest.lat, dest.lng);
     setDistanceKm(km);
-    setEstimatedPrice(Math.round(4500 + km * 1800));
+    setEstimatedPrice(Math.max(5500, Math.round((4500 + km * 1800) * 0.8 / 1000) * 1000));
+    setPassengerOffer('');
   }, [origin, dest]);
 
   // Listen for trip events while searching
@@ -676,7 +632,15 @@ function PassengerHome() {
 
   const confirmOrigin = () => {
     if (!pending) return;
+    const originRegion: Region = {
+      latitude: pending.lat,
+      longitude: pending.lng,
+      latitudeDelta: 0.0025,
+      longitudeDelta: 0.0025,
+    };
     setOrigin(pending);
+    setRegion(originRegion);
+    mapRef.current?.animateToRegion(originRegion, 500);
     setPending(null);
     setQuery('');
     setResults([]);
@@ -736,7 +700,7 @@ function PassengerHome() {
         tripPayload.destinationLat = Number(dest!.lat);
         tripPayload.destinationLng = Number(dest!.lng);
         tripPayload.destinationAddress = normalizedDestinationAddress;
-        tripPayload.estimatedPrice = Number(estimatedPrice) || 0;
+        tripPayload.passengerOffer = passengerOffer.trim() ? Number(passengerOffer) : undefined;
         tripPayload.destinationPending = false;
       } else {
         // When the destination is intentionally omitted or equal to the origin,
@@ -745,7 +709,6 @@ function PassengerHome() {
         tripPayload.destinationLng = Number(origin.lng);
         tripPayload.destinationAddress = fallbackDestinationAddress;
         tripPayload.destinationPending = true;
-        tripPayload.estimatedPrice = 0;
       }
 
       for (const k of Object.keys(tripPayload)) {
@@ -835,7 +798,7 @@ function PassengerHome() {
       <MapView
         ref={mapRef}
         style={StyleSheet.absoluteFill}
-        provider={PROVIDER_DEFAULT}
+        mapType="standard"
         region={region}
         onRegionChangeComplete={handleRegionChange}
         showsUserLocation
@@ -845,6 +808,12 @@ function PassengerHome() {
         pitchEnabled={false}
         rotateEnabled={false}
       >
+        <UrlTile
+          urlTemplate={MAP_TILE_URL}
+          maximumZ={19}
+          tileSize={256}
+          zIndex={1}
+        />
         {nearbyTaxis.length > 0 && (
           nearbyTaxis.map((taxi) => (
             <Marker key={taxi.id} coordinate={{ latitude: taxi.lat, longitude: taxi.lng }} title="Taxi cercano">
@@ -921,7 +890,7 @@ function PassengerHome() {
       {/* Bottom sheet — idle */}
       {step === 'idle' && (
         <View style={[styles.sheet, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
-          <Text style={styles.sheetTitle}>Hola, {user?.name?.split(' ')[0]} 👋</Text>
+          <Text style={styles.sheetTitle}>Hola, {user?.name?.split(' ')[0]}</Text>
 
           <View style={styles.summaryCard}>
             <View style={styles.summaryHeader}>
@@ -1016,8 +985,9 @@ function PassengerHome() {
           {/* Confirmation */}
           {pending && (
             <View style={styles.pendingBox}>
-              <Text style={styles.pendingLabel}>¿Es correcta esta ubicación?</Text>
+              <Text style={styles.pendingLabel}>Verifica el pin en el mapa</Text>
               <Text style={styles.pendingAddress} numberOfLines={2}>{pending.address}</Text>
+              <Text style={styles.pendingHint}>Si el punto no coincide exactamente, busca otra opción antes de continuar.</Text>
             </View>
           )}
           <TouchableOpacity
@@ -1071,14 +1041,27 @@ function PassengerHome() {
             </View>
           </View>
 
-          <View style={styles.priceRow}>
+          {dest.lat !== origin.lat || dest.lng !== origin.lng ? <View style={styles.priceRow}>
             <View>
               <Text style={styles.priceLabel}>Precio estimado</Text>
-              <Text style={styles.priceNote}>⚠️ Este es un precio estimado, puede variar</Text>
+              <Text style={styles.priceNote}>Tarifa sugerida económica · puede variar</Text>
             </View>
             <Text style={styles.priceValue}>${estimatedPrice.toLocaleString('es-CO')}</Text>
-          </View>
-          <Text style={styles.distanceNote}>{distanceKm.toFixed(1)} km · Taxi</Text>
+          </View> : <Text style={styles.priceNote}>Sin destino: la tarifa se definirá cuando indiques el destino.</Text>}
+          {dest.lat !== origin.lat || dest.lng !== origin.lng ? <>
+            <Text style={styles.distanceNote}>{distanceKm.toFixed(1)} km · Taxi</Text>
+            <Text style={styles.offerHint}>
+              Acepta la tarifa sugerida o aumenta tu oferta en múltiplos de $500. No puedes ofrecer menos.
+            </Text>
+            <TextInput
+              style={styles.offerInput}
+              keyboardType="numeric"
+              value={passengerOffer}
+              onChangeText={(text) => setPassengerOffer(text.replace(/[^\d]/g, ''))}
+              placeholder={`Oferta opcional · mínimo $${estimatedPrice.toLocaleString('es-CO')}`}
+              placeholderTextColor={colors.light.mutedForeground}
+            />
+          </> : null}
 
           {/* Payment method selector */}
           <View style={styles.paySection}>
@@ -1155,7 +1138,15 @@ function PassengerHome() {
             </View>
           </View>
 
-          {/* No price/distance when destination is missing */}
+          <View style={styles.noDestinationCard}>
+            <Feather name="info" size={17} color={colors.light.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.noDestinationTitle}>Viaje sin destino</Text>
+              <Text style={styles.noDestinationText}>
+                El conductor acordará contigo la tarifa cuando le indiques a dónde vas.
+              </Text>
+            </View>
+          </View>
 
           {/* Payment method selector (still allow choosing) */}
           <View style={styles.paySection}>
@@ -1200,7 +1191,7 @@ function PassengerHome() {
           <TouchableOpacity style={styles.primaryBtn} onPress={requestTaxi} disabled={createTrip.isPending} activeOpacity={0.85}>
             {createTrip.isPending
               ? <ActivityIndicator color={colors.light.primaryForeground} />
-              : <><Feather name="navigation" size={18} color={colors.light.primaryForeground} /><Text style={styles.primaryBtnText}>Solicitar taxi</Text></>
+              : <><Feather name="navigation" size={18} color={colors.light.primaryForeground} /><Text style={styles.primaryBtnText}>Solicitar taxi sin destino</Text></>
             }
           </TouchableOpacity>
           <TouchableOpacity
@@ -1226,6 +1217,8 @@ function DriverHome() {
   const { user, updateUser } = useAuth();
   const { socket } = useSocket();
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [locationError, setLocationError] = useState(false);
+  const [locationLoading, setLocationLoading] = useState(true);
   // Always start offline — drivers must manually connect each session
   const [isOnline, setIsOnline] = useState(false);
   const [requests, setRequests] = useState<any[]>([]);
@@ -1285,18 +1278,29 @@ function DriverHome() {
   useEffect(() => {
     let sub: Location.LocationSubscription | null = null;
     (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
-      const pos = await Location.getCurrentPositionAsync({});
-      setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-      if (isOnline) {
-        sub = await Location.watchPositionAsync(
-          { accuracy: Location.Accuracy.Balanced, timeInterval: 8_000, distanceInterval: 30 },
-          async (p) => {
-            setLocation({ lat: p.coords.latitude, lng: p.coords.longitude });
-            try { await updateLocation.mutateAsync({ data: { lat: p.coords.latitude, lng: p.coords.longitude } }); } catch { }
-          },
-        );
+      try {
+        setLocationLoading(true);
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          setLocationError(true);
+          return;
+        }
+        const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+        setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setLocationError(false);
+        if (isOnline) {
+          sub = await Location.watchPositionAsync(
+            { accuracy: Location.Accuracy.High, timeInterval: 8_000, distanceInterval: 30 },
+            async (p) => {
+              setLocation({ lat: p.coords.latitude, lng: p.coords.longitude });
+              try { await updateLocation.mutateAsync({ data: { lat: p.coords.latitude, lng: p.coords.longitude } }); } catch { }
+            },
+          );
+        }
+      } catch {
+        setLocationError(true);
+      } finally {
+        setLocationLoading(false);
       }
     })();
     return () => { sub?.remove(); };
@@ -1399,8 +1403,55 @@ function DriverHome() {
     router.push(`/trip/${req.id}`);
   };
 
+  const handleCounterOffer = (req: any) => {
+    const minimum = Number(req.passengerOffer ?? req.minimumFare) + 500;
+    const submitCounterOffer = async (value: string) => {
+      const amount = Number(value);
+      if (!Number.isFinite(amount)) return;
+      try {
+        const token = await AsyncStorage.getItem('auth_token');
+        const response = await fetch(`${getApiUrl()}/trips/${req.id}/counteroffer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' },
+          body: JSON.stringify({ amount }),
+        });
+        if (!response.ok) throw new Error((await response.json()).error ?? 'Contraoferta inválida');
+        Alert.alert('Contraoferta enviada', 'El pasajero recibirá tu propuesta.');
+      } catch (error: any) { Alert.alert('Error', error?.message ?? 'No se pudo enviar la contraoferta.'); }
+    };
+
+    if (Platform.OS === 'ios') {
+      Alert.prompt(
+        'Contraoferta',
+        `Ingresa una tarifa mayor (mínimo $${minimum.toLocaleString('es-CO')})`,
+        submitCounterOffer,
+        'plain-text',
+      );
+      return;
+    }
+
+    Alert.alert(
+      'Contraoferta',
+      `Selecciona una tarifa mayor a $${(minimum - 500).toLocaleString('es-CO')}`,
+      [
+        { text: `$${minimum.toLocaleString('es-CO')}`, onPress: () => submitCounterOffer(String(minimum)) },
+        { text: `$${(minimum + 500).toLocaleString('es-CO')}`, onPress: () => submitCounterOffer(String(minimum + 500)) },
+        { text: `$${(minimum + 1000).toLocaleString('es-CO')}`, onPress: () => submitCounterOffer(String(minimum + 1000)) },
+        { text: 'Cancelar', style: 'cancel' },
+      ],
+    );
+  };
+
   const toggleOnline = async () => {
     const next = !isOnline;
+    if (next && (!location || locationError)) {
+      Alert.alert(
+        'Ubicación necesaria',
+        'Activa el permiso de ubicación para conectarte y recibir solicitudes cercanas.',
+        [{ text: 'Entendido' }],
+      );
+      return;
+    }
     try {
       await updateStatus.mutateAsync({ data: { isOnline: next } });
       setIsOnline(next);
@@ -1489,11 +1540,11 @@ function DriverHome() {
           <TouchableOpacity
             style={[styles.toggleBtn, isOnline ? styles.toggleBtnOn : styles.toggleBtnOff]}
             onPress={toggleOnline}
-            disabled={updateStatus.isPending}
+            disabled={updateStatus.isPending || locationLoading}
           >
             {updateStatus.isPending
               ? <ActivityIndicator size="small" color={colors.light.primaryForeground} />
-              : <Text style={styles.toggleBtnText}>{isOnline ? 'Desconectar' : 'Conectar'}</Text>
+              : <Text style={styles.toggleBtnText}>{locationLoading ? 'Ubicando...' : isOnline ? 'Desconectar' : 'Conectar'}</Text>
             }
           </TouchableOpacity>
         </View>
@@ -1521,8 +1572,13 @@ function DriverHome() {
                 )}
               </View>
               <View style={styles.requestMeta}>
-                <Text style={styles.reqPrice}>${Number(req.estimatedPrice).toLocaleString('es-CO')}</Text>
-                <Text style={styles.reqDist}>{Number(req.distanceKm).toFixed(1)} km</Text>
+                {req.estimatedPrice != null ? (
+                  <View>
+                    <Text style={styles.reqPrice}>${Number(req.passengerOffer ?? req.estimatedPrice).toLocaleString('es-CO')}</Text>
+                    <Text style={styles.reqPriceLabel}>{req.passengerOffer != null ? 'Oferta del pasajero' : 'Tarifa sugerida'}</Text>
+                  </View>
+                ) : <Text style={styles.reqPrice}>Sin tarifa</Text>}
+                {req.distanceKm != null && <Text style={styles.reqDist}>{Number(req.distanceKm).toFixed(1)} km</Text>}
                 <View style={styles.reqPayBadge}>
                   <View style={styles.reqPayIcon}><PaymentIcon type={getPaymentInfo(req.paymentMethod).kind} /></View>
                   <Text style={styles.reqPayText}>
@@ -1530,6 +1586,11 @@ function DriverHome() {
                   </Text>
                 </View>
               </View>
+              {req.passengerOffer != null && (
+                <TouchableOpacity style={styles.counterBtn} onPress={() => handleCounterOffer(req)}>
+                  <Text style={styles.counterText}>Enviar una tarifa mayor</Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity
                 style={[styles.acceptBtn, acceptingId === req.id && { opacity: 0.6 }]}
                 onPress={() => handleAccept(req)}
@@ -1548,7 +1609,20 @@ function DriverHome() {
 
       {!isOnline && (
         <View style={[styles.offlineCard, { bottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
-          <Text style={styles.offlineText}>Conéctate para recibir solicitudes de taxi</Text>
+          <Feather name={locationError ? 'map-pin' : 'power'} size={16} color={locationError ? colors.light.destructive : colors.light.primary} />
+          <Text style={styles.offlineText}>
+            {locationError ? 'Activa la ubicación para poder conectarte' : 'Conéctate para recibir solicitudes de taxi'}
+          </Text>
+        </View>
+      )}
+
+      {isOnline && requests.length === 0 && (
+        <View style={[styles.onlineEmptyCard, { bottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
+          <Feather name="radio" size={16} color={colors.light.primary} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.onlineEmptyTitle}>Buscando solicitudes</Text>
+            <Text style={styles.onlineEmptyText}>Te avisaremos cuando haya un viaje cerca.</Text>
+          </View>
         </View>
       )}
 
@@ -1604,7 +1678,7 @@ const styles = StyleSheet.create({
   topLabelText: { fontSize: 13, fontWeight: '600', color: colors.light.foreground, fontFamily: 'Inter_600SemiBold' },
   // Searching overlay
   searchingOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: colors.light.background + 'F0',
     alignItems: 'center', justifyContent: 'center', gap: 16,
   },
@@ -1699,6 +1773,7 @@ const styles = StyleSheet.create({
   },
   pendingLabel: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold', marginBottom: 4 },
   pendingAddress: { fontSize: 14, color: colors.light.foreground, fontFamily: 'Inter_500Medium', lineHeight: 19 },
+  pendingHint: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', lineHeight: 17, marginTop: 5 },
   btnDisabled: { opacity: 0.45 },
   addressText: { flex: 1, fontSize: 15, color: colors.light.foreground, fontFamily: 'Inter_400Regular', lineHeight: 22 },
   routeSummary: { gap: 8 },
@@ -1708,8 +1783,17 @@ const styles = StyleSheet.create({
   priceRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   priceLabel: { fontSize: 14, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
   priceNote: { fontSize: 11, color: '#FFB800', fontFamily: 'Inter_400Regular', marginTop: 2 },
+  offerInput: { borderWidth: 1, borderColor: colors.light.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9, marginTop: 8, color: colors.light.foreground, fontFamily: 'Inter_400Regular' },
   priceValue: { fontSize: 26, fontWeight: '700', color: colors.light.primary, fontFamily: 'Inter_700Bold' },
   distanceNote: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
+  offerHint: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', lineHeight: 17, marginTop: 8 },
+  noDestinationCard: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 10,
+    backgroundColor: colors.light.primary + '12', borderRadius: 12,
+    borderWidth: 1, borderColor: colors.light.primary + '45', padding: 12,
+  },
+  noDestinationTitle: { fontSize: 14, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  noDestinationText: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', lineHeight: 17, marginTop: 3 },
   primaryBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     backgroundColor: colors.light.primary, borderRadius: colors.radius, paddingVertical: 15,
@@ -1723,6 +1807,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.light.card + 'F8', borderRadius: colors.radius,
     borderWidth: 1, borderColor: colors.light.border, padding: 14, gap: 10,
   },
+  counterBtn: { alignItems: 'center', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: colors.light.primary },
+  counterText: { color: colors.light.primary, fontFamily: 'Inter_700Bold', fontSize: 13 },
   requestTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   requestTitle: { flex: 1, fontSize: 14, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
   countdownPill: {
@@ -1736,6 +1822,7 @@ const styles = StyleSheet.create({
   reqText: { flex: 1, fontSize: 13, color: colors.light.foreground, fontFamily: 'Inter_400Regular' },
   requestMeta: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   reqPrice: { fontSize: 20, fontWeight: '700', color: colors.light.primary, fontFamily: 'Inter_700Bold' },
+  reqPriceLabel: { fontSize: 11, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', marginTop: 1 },
   reqDist: { fontSize: 13, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
   reqPayBadge: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
@@ -1763,9 +1850,16 @@ const styles = StyleSheet.create({
   offlineCard: {
     position: 'absolute', left: 16, right: 16,
     backgroundColor: colors.light.card + 'F0', borderRadius: colors.radius,
-    borderWidth: 1, borderColor: colors.light.border, paddingVertical: 14, alignItems: 'center',
+    borderWidth: 1, borderColor: colors.light.border, paddingVertical: 14, paddingHorizontal: 14, alignItems: 'center', flexDirection: 'row', gap: 10,
   },
   offlineText: { fontSize: 14, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
+  onlineEmptyCard: {
+    position: 'absolute', left: 16, right: 16,
+    backgroundColor: colors.light.card + 'F0', borderRadius: colors.radius,
+    borderWidth: 1, borderColor: colors.light.primary + '55', padding: 14, flexDirection: 'row', alignItems: 'center', gap: 10,
+  },
+  onlineEmptyTitle: { fontSize: 14, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  onlineEmptyText: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', marginTop: 2 },
   markerDot: { width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: '#fff' },
   // Panic button
   panicBtnWrap: {

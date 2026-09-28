@@ -58,6 +58,7 @@ export interface User {
   currentLng?: number | null;
   rating: number;
   ratingCount: number;
+  completedTrips?: number;
   createdAt: string;
 }
 
@@ -171,11 +172,21 @@ export interface Trip {
   originLat: number;
   originLng: number;
   originAddress: string;
-  destinationLat: number;
-  destinationLng: number;
-  destinationAddress: string;
+  /** @nullable */
+  destinationLat?: number | null;
+  /** @nullable */
+  destinationLng?: number | null;
+  /** @nullable */
+  destinationAddress?: string | null;
+  destinationPending?: boolean;
   vehicleType: string;
-  estimatedPrice: number;
+  estimatedPrice?: number | null;
+  /** @nullable */
+  minimumFare?: number | null;
+  /** @nullable */
+  passengerOffer?: number | null;
+  /** @nullable */
+  driverCounteroffer?: number | null;
   /** @nullable */
   finalPrice?: number | null;
   /** @nullable */
@@ -217,12 +228,14 @@ export interface TripInput {
   originLat: number;
   originLng: number;
   originAddress: string;
-  destinationLat: number;
-  destinationLng: number;
-  destinationAddress: string;
+  destinationLat?: number | null;
+  destinationLng?: number | null;
+  destinationAddress?: string | null;
+  destinationPending?: boolean;
   vehicleType: TripInputVehicleType;
   paymentMethod: TripInputPaymentMethod;
   estimatedPrice?: number;
+  passengerOffer?: number;
 }
 
 export type TripStatusUpdateStatus = typeof TripStatusUpdateStatus[keyof typeof TripStatusUpdateStatus];
@@ -249,12 +262,14 @@ export interface Message {
   tripId: number;
   senderId: number;
   content: string;
+  attachments?: { name: string; mimeType: string; size: number; url: string }[];
   senderName?: string;
   createdAt: string;
 }
 
 export interface MessageInput {
   content: string;
+  attachments?: { name: string; mimeType: string; size: number; data: string }[];
 }
 
 export interface Rating {
@@ -327,4 +342,3 @@ status?: string;
 limit?: number;
 offset?: number;
 };
-

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ScrollView,
-  ActivityIndicator, Modal, TextInput,
+  ActivityIndicator, Modal, TextInput, Linking,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -287,6 +287,21 @@ function RenewalSubscriptionModal({
         Alert.alert('No se pudo procesar el pago', body.error ?? 'Inténtalo de nuevo.');
         return;
       }
+
+      if (body.status === 'pending_payment' && body.checkoutUrl) {
+        Alert.alert(
+          'Completa el pago',
+          'Serás redirigido a la pasarela de pagos para confirmar la renovación de tu suscripción.',
+          [
+            { text: 'Cancelar', style: 'cancel' },
+            { text: 'Ir a pagar', onPress: () => Linking.openURL(body.checkoutUrl) },
+          ],
+        );
+        onRenewed();
+        onClose();
+        return;
+      }
+
       Alert.alert('Pago realizado', `Tu suscripción ${selectedPlanDetails.label.toLowerCase()} quedó activa con ${RENEWAL_PAYMENT_OPTIONS.find(opt => opt.key === selectedMethod)?.label ?? 'pago online'}.`);
       onRenewed();
       onClose();

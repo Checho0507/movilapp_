@@ -6,6 +6,7 @@ import driversRouter, { setIO as setDriversIO } from "./drivers.js";
 import vehiclesRouter from "./vehicles.js";
 import adminRouter from "./admin.js";
 import conversationsRouter, { setIO as setConversationsIO } from "./conversations.js";
+import mapTilesRouter from "./mapTiles.js";
 import type { Server as IOServer } from "socket.io";
 
 const router: IRouter = Router();
@@ -17,6 +18,7 @@ router.use("/drivers", driversRouter);
 router.use("/vehicles", vehiclesRouter);
 router.use("/admin", adminRouter);
 router.use("/conversations", conversationsRouter);
+router.use("/map-tiles", mapTilesRouter);
 
 export function initIO(io: IOServer) {
   setTripsIO(io);

@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/admin-dashboard/"
+title = "Panel de Administración"
+description = "Panel de administración web para MóvilApp. Permite monitorear viajes en tiempo real, gestionar conductores y pasajeros, administrar suscripciones y ver estadísticas de la plataforma."
+version = "1.0.0"
+id = "artifacts/admin-dashboard"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/admin-dashboard/" ]
+localPort = 22133
+
+[services.development]
+run = "pnpm --filter @workspace/admin-dashboard run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/admin-dashboard", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/admin-dashboard/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22133"
+BASE_PATH = "/admin-dashboard/"

@@ -34,6 +34,8 @@ export const MapView = forwardRef<any, any>(function MapView({ style, children }
 /** Web Marker stub — invisible on web */
 export const Marker: React.FC<any> = () => null;
 
+export const UrlTile: React.FC<any> = () => null;
+
 /** Web Polyline stub — invisible on web */
 export const Polyline: React.FC<any> = () => null;
 

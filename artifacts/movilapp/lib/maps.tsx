@@ -47,6 +47,8 @@ export function Marker(_props: {
   return null;
 }
 
+export const UrlTile: React.FC<any> = () => null;
+
 export function Polyline(_props: {
   coordinates: { latitude: number; longitude: number }[];
   strokeColor?: string;

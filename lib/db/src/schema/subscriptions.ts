@@ -19,6 +19,14 @@ export const SUBSCRIPTION_PLANS = {
 
 export type SubscriptionPlan = keyof typeof SUBSCRIPTION_PLANS;
 
+export const subscriptionPlansTable = pgTable("subscription_plans", {
+  key: text("key").primaryKey(),
+  label: text("label").notNull(),
+  days: integer("days").notNull(),
+  priceCop: integer("price_cop").notNull().default(0),
+  isActive: boolean("is_active").notNull().default(true),
+});
+
 export const subscriptionsTable = pgTable("subscriptions", {
   id: serial("id").primaryKey(),
   driverId: integer("driver_id")

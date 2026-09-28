@@ -4,11 +4,14 @@ import {
   FlatList, ActivityIndicator, Platform, Alert, KeyboardAvoidingView,
   Modal, ScrollView, Linking,
 } from 'react-native';
-import { MapView, Marker, Polyline, PROVIDER_DEFAULT } from '@/lib/maps';
+import { Image } from 'react-native';
+import { MapView, Marker, Polyline, UrlTile } from '@/lib/maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, router } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 import * as Location from 'expo-location';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   useGetTrip, useListTripMessages, useCreateMessage, useUpdateTripStatus, useUpdateDriverLocation,
@@ -17,10 +20,10 @@ import { useAuth } from '@/context/AuthContext';
 import { useSocket } from '@/context/SocketContext';
 import colors from '@/constants/colors';
 
-import { getApiUrl } from '@/lib/api-config';
+import { getApiUrl, getMapTileUrl } from '@/lib/api-config';
 
 const BASE_URL = getApiUrl();
-
+const MAP_TILE_URL = getMapTileUrl();
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Buscando conductor...',
   accepted: 'Conductor asignado — en camino',
@@ -34,6 +37,15 @@ const STATUS_COLORS: Record<string, string> = {
   pending: '#FFB800', accepted: '#3B82F6',
   driver_arriving: '#6366F1', in_progress: '#10B981',
   completed: colors.light.primary, cancelled: '#FF4757',
+};
+
+const PAYMENT_LABELS: Record<string, string> = {
+  cash: 'Efectivo',
+  nequi: 'Transferencia (Nequi)',
+  daviplata: 'Transferencia (Daviplata)',
+  breve: 'Transferencia (Bre-B)',
+  pse: 'PSE',
+  tarjeta: 'Tarjeta',
 };
 
 const QUALITY_PHRASES = [
@@ -197,7 +209,6 @@ export default function TripScreen() {
 
   // Server data — hooks take id:number directly (not an object)
   const { data: tripData } = useGetTrip(tripId);
-  const { data: serverMessages = [] } = useListTripMessages(tripId);
   const updateStatus = useUpdateTripStatus();
   const sendMsg = useCreateMessage();
   const pushLocation = useUpdateDriverLocation();
@@ -207,11 +218,22 @@ export default function TripScreen() {
   const [messages, setMessages] = useState<any[]>([]);
   const [showChat, setShowChat] = useState(false);
   const [msgText, setMsgText] = useState('');
+  const [msgAttachments, setMsgAttachments] = useState<{ name: string; mimeType: string; size: number; data: string }[]>([]);
   const [unread, setUnread] = useState(0);
   const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [showQualityState, setShowQualityState] = useState(false);
   const [qualityPhrase, setQualityPhrase] = useState(getRandomQualityPhrase());
+
+  const canChat = Boolean(
+    trip?.driverId &&
+      (trip.status === 'accepted' || trip.status === 'driver_arriving' || trip.status === 'in_progress') &&
+      (trip.passengerId === user?.id || trip.driverId === user?.id),
+  );
+
+  const { data: serverMessages = [] } = useListTripMessages(tripId, {
+    query: { queryKey: ['tripMessages', tripId], enabled: canChat },
+  });
 
   // Verification flow (driver only)
   const [showVerify, setShowVerify] = useState(false);
@@ -351,6 +373,13 @@ export default function TripScreen() {
     };
   }, [socket, showChat]);
 
+  useEffect(() => {
+    if (!canChat && showChat) {
+      setShowChat(false);
+      setUnread(0);
+    }
+  }, [canChat, showChat]);
+
   // ─── Waze navigation ─────────────────────────────────────────────────────
 
   const openWaze = useCallback((lat: number, lng: number) => {
@@ -389,9 +418,12 @@ export default function TripScreen() {
 
   const handleSendMessage = async () => {
     const content = msgText.trim();
-    if (!content) return;
+    if (!content && !msgAttachments.length) return;
     setMsgText('');
-    try { await sendMsg.mutateAsync({ id: tripId, data: { content } }); } catch { /* ignore */ }
+    try {
+      await sendMsg.mutateAsync({ id: tripId, data: { content, attachments: msgAttachments } });
+      setMsgAttachments([]);
+    } catch { /* ignore */ }
   };
 
   const submitRating = async () => {
@@ -490,14 +522,20 @@ export default function TripScreen() {
 
   return (
     <View style={styles.root}>
-      {/* Map */}
-      <MapView
+      {/* Passenger map; drivers navigate with Waze from the action buttons below. */}
+      {!isDriver && <MapView
         ref={mapRef}
         style={StyleSheet.absoluteFill}
-        provider={PROVIDER_DEFAULT}
+        mapType="standard"
         initialRegion={mapRegion}
         region={mapRegion}
       >
+        <UrlTile
+          urlTemplate={MAP_TILE_URL}
+          maximumZ={19}
+          tileSize={256}
+          zIndex={1}
+        />
         {!focusDriver && (
           <>
             <Marker coordinate={{ latitude: trip.originLat, longitude: trip.originLng }} title="Origen">
@@ -532,7 +570,7 @@ export default function TripScreen() {
             lineDashPattern={[8, 5]}
           />
         )}
-      </MapView>
+      </MapView>}
 
       {/* Status header */}
       <View style={[styles.header, { top: insets.top + (Platform.OS === 'web' ? 67 : 0) }]}>
@@ -545,13 +583,15 @@ export default function TripScreen() {
           <Text style={styles.statusText}>{STATUS_LABELS[trip.status] ?? trip.status}</Text>
         </View>
 
-        <TouchableOpacity
-          style={[styles.chatBtn, unread > 0 && styles.chatBtnActive]}
-          onPress={() => { setShowChat(v => !v); setUnread(0); }}
-        >
-          <Feather name="message-circle" size={20} color={showChat ? colors.light.primary : colors.light.foreground} />
-          {unread > 0 && <View style={styles.badge}><Text style={styles.badgeText}>{unread}</Text></View>}
-        </TouchableOpacity>
+        {canChat ? (
+          <TouchableOpacity
+            style={[styles.chatBtn, unread > 0 && styles.chatBtnActive]}
+            onPress={() => { setShowChat(v => !v); setUnread(0); }}
+          >
+            <Feather name="message-circle" size={20} color={showChat ? colors.light.primary : colors.light.foreground} />
+            {unread > 0 && <View style={styles.badge}><Text style={styles.badgeText}>{unread}</Text></View>}
+          </TouchableOpacity>
+        ) : <View style={styles.chatBtnPlaceholder} />}
       </View>
 
       {/* Countdown pill */}
@@ -591,13 +631,30 @@ export default function TripScreen() {
                 return (
                   <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
                     {!mine && <Text style={styles.senderName}>{item.senderName}</Text>}
-                    <Text style={styles.bubbleText}>{item.content}</Text>
+                    {item.content ? <Text style={styles.bubbleText}>{item.content}</Text> : null}
+                    {item.attachments?.map((file: any) => file.mimeType.startsWith('image/')
+                      ? <Image key={file.url} source={{ uri: `${BASE_URL}${file.url}` }} style={styles.chatAttachmentImage} />
+                      : <Text key={file.url} style={styles.chatAttachmentName}>{file.name}</Text>)}
                   </View>
                 );
               }}
               ListEmptyComponent={<Text style={styles.emptyChat}>Sin mensajes aún</Text>}
             />
             <View style={styles.inputRow}>
+              <TouchableOpacity style={styles.chatAttachBtn} onPress={async () => {
+                const result = await DocumentPicker.getDocumentAsync({ type: ['image/*', 'application/pdf', 'text/plain', 'application/zip'], multiple: true, copyToCacheDirectory: true });
+                if (result.canceled) return;
+                try {
+                  const next = await Promise.all(result.assets.slice(0, 5).map(async file => ({
+                    name: file.name, mimeType: file.mimeType ?? 'application/octet-stream', size: file.size ?? 0,
+                    data: `data:${file.mimeType ?? 'application/octet-stream'};base64,${await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 })}`,
+                  })));
+                  if (next.some(file => file.size > 8 * 1024 * 1024)) throw new Error('Archivo demasiado grande');
+                  setMsgAttachments(next);
+                } catch (error) { Alert.alert('Adjunto no válido', error instanceof Error ? error.message : 'No se pudo leer el archivo'); }
+              }}>
+                <Feather name="paperclip" size={18} color={colors.light.foreground} />
+              </TouchableOpacity>
               <TextInput
                 style={styles.chatInput}
                 value={msgText}
@@ -607,7 +664,7 @@ export default function TripScreen() {
                 returnKeyType="send"
                 onSubmitEditing={handleSendMessage}
               />
-              <TouchableOpacity style={[styles.sendBtn, !msgText.trim() && { opacity: 0.4 }]} onPress={handleSendMessage} disabled={!msgText.trim()}>
+              <TouchableOpacity style={[styles.sendBtn, !msgText.trim() && !msgAttachments.length && { opacity: 0.4 }]} onPress={handleSendMessage} disabled={!msgText.trim() && !msgAttachments.length}>
                 <Feather name="send" size={18} color={colors.light.primaryForeground} />
               </TouchableOpacity>
             </View>
@@ -620,7 +677,7 @@ export default function TripScreen() {
               <View style={styles.priceRow}>
                 <Text style={styles.priceValue}>${Number(trip.finalPrice ?? trip.estimatedPrice).toLocaleString('es-CO')}</Text>
                 {!trip.finalPrice && <Text style={styles.priceEstLabel}> estimado</Text>}
-                <Text style={styles.payMethod}>· Efectivo</Text>
+                <Text style={styles.payMethod}>· {PAYMENT_LABELS[trip.paymentMethod] ?? trip.paymentMethod}</Text>
               </View>
               {!focusDriver && (
                 <View style={styles.routeBlock}>
@@ -900,6 +957,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.light.card + 'F0', alignItems: 'center', justifyContent: 'center',
     borderWidth: 1, borderColor: colors.light.border,
   },
+  chatBtnPlaceholder: { width: 40, height: 40 },
   chatBtnActive: { borderColor: colors.light.primary },
   badge: {
     position: 'absolute', top: -4, right: -4, width: 16, height: 16,
@@ -980,6 +1038,12 @@ const styles = StyleSheet.create({
     width: 40, height: 40, borderRadius: 20,
     backgroundColor: colors.light.primary, alignItems: 'center', justifyContent: 'center',
   },
+  chatAttachBtn: {
+    width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: colors.light.border,
+  },
+  chatAttachmentImage: { width: 180, height: 120, borderRadius: 10, marginTop: 4 },
+  chatAttachmentName: { fontSize: 13, textDecorationLine: 'underline', marginTop: 4 },
   // Modals
   modalOverlay: {
     flex: 1, backgroundColor: '#00000090',

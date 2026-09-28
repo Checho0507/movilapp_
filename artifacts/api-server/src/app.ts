@@ -26,7 +26,8 @@ app.use(
   }),
 );
 app.use(cors({ origin: "*" }));
-app.use(express.json());
+app.use("/api/drivers/wompi-webhook", express.raw({ type: "application/json" }));
+app.use(express.json({ limit: "14mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);

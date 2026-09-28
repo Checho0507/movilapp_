@@ -15,7 +15,11 @@ export const tripsTable = pgTable("trips", {
   destinationAddress: text("destination_address"),
   destinationPending: boolean("destination_pending").notNull().default(false),
   vehicleType: text("vehicle_type").notNull().default("taxi"),
-  estimatedPrice: numeric("estimated_price").notNull().default("0"),
+  /** Economical fare suggested by the backend; null until a destination exists. */
+  estimatedPrice: numeric("estimated_price"),
+  minimumFare: numeric("minimum_fare"),
+  passengerOffer: numeric("passenger_offer"),
+  driverCounteroffer: numeric("driver_counteroffer"),
   finalPrice: numeric("final_price"),
   /** Precio real reportado voluntariamente por el pasajero al finalizar el viaje */
   actualPrice: numeric("actual_price"),
