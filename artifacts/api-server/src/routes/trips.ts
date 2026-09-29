@@ -1,12 +1,49 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { tripsTable, messagesTable, ratingsTable, usersTable, subscriptionsTable } from "@workspace/db";
-import { eq, and, desc, sql, inArray, gt } from "drizzle-orm";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import { authenticate } from "../lib/auth.js";
 import { formatUser } from "./auth.js";
 import type { Server as IOServer } from "socket.io";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { uploadDir, saveAttachments, type IncomingAttachment } from "../lib/attachments.js";
 
 const router = Router();
+const ACTIVE_CHAT_STATUSES = ["accepted", "driver_arriving", "in_progress"] as const;
+function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const radians = (value: number) => (value * Math.PI) / 180;
+  const dLat = radians(lat2 - lat1);
+  const dLng = radians(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(radians(lat1)) * Math.cos(radians(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+async function ensureDriverHasStarterSubscription(driverId: number) {
+  const [existing] = await db
+    .select({ id: subscriptionsTable.id, expiresAt: subscriptionsTable.expiresAt })
+    .from(subscriptionsTable)
+    .where(eq(subscriptionsTable.driverId, driverId))
+    .orderBy(subscriptionsTable.expiresAt)
+    .limit(1);
+
+  if (existing) return existing;
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000);
+  return db
+    .insert(subscriptionsTable)
+    .values({
+      driverId,
+      plan: "trial",
+      priceCop: 0,
+      startsAt: now,
+      expiresAt,
+      isTrial: true,
+    })
+    .returning();
+}
 
 let io: IOServer | null = null;
 export function setIO(ioInstance: IOServer) {
@@ -16,8 +53,8 @@ export function setIO(ioInstance: IOServer) {
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /**
- * Retry trip:new_request up to 3 rounds (0s, 10s, 20s).
- * After 30s with no acceptance, auto-cancels the trip and notifies the passenger.
+ * Re-broadcast trip:new_request every 30s for up to 2 minutes to nearby eligible drivers.
+ * If nobody accepts within 2 minutes, the trip auto-cancels and informs the passenger.
  */
 async function scheduleRetries(
   tripId: number,
@@ -27,12 +64,14 @@ async function scheduleRetries(
   originLng: number,
   enriched: any,
 ) {
-  for (let round = 2; round <= 3; round++) {
-    await sleep(10_000);
+  const retryDelaysMs = [30_000, 60_000, 90_000, 120_000];
+
+  for (const delayMs of retryDelaysMs) {
+    await sleep(delayMs);
     const [current] = await db
       .select({ id: tripsTable.id, status: tripsTable.status })
       .from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
-    if (!current || current.status !== "pending") return; // accepted / cancelled already
+    if (!current || current.status !== "pending") return;
 
     const eligibleIds = await getEligibleDriverIds(paymentMethod, originLat, originLng);
     for (const driverId of eligibleIds) {
@@ -40,8 +79,7 @@ async function scheduleRetries(
     }
   }
 
-  // 10 s after the 3rd emit — if still pending, auto-cancel
-  await sleep(10_000);
+  await sleep(5_000);
   const [current] = await db
     .select({ id: tripsTable.id, status: tripsTable.status })
     .from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
@@ -58,6 +96,72 @@ async function scheduleRetries(
     io?.to(`user:${passengerId}`).emit("trip_status_updated", enrichedCancelled);
     io?.to(`trip:${tripId}`).emit("trip:cancelled", enrichedCancelled);
   }
+}
+
+export function resolveTripDestination(input: {
+  originLat: number;
+  originLng: number;
+  destinationLat?: number | null;
+  destinationLng?: number | null;
+  destinationAddress?: string | null;
+  originAddress?: string | null;
+  destinationPending?: boolean;
+}) {
+  const normalizedOriginAddress = typeof input.originAddress === "string" ? input.originAddress.trim() : "";
+  const normalizedDestinationAddress = typeof input.destinationAddress === "string" ? input.destinationAddress.trim() : "";
+
+  const sameAsOrigin =
+    typeof input.destinationLat === "number" &&
+    typeof input.destinationLng === "number" &&
+    Number.isFinite(input.destinationLat) &&
+    Number.isFinite(input.destinationLng) &&
+    Number(input.destinationLat) === Number(input.originLat) &&
+    Number(input.destinationLng) === Number(input.originLng);
+
+  const hasDestination =
+    typeof input.destinationLat === "number" &&
+    typeof input.destinationLng === "number" &&
+    Number.isFinite(input.destinationLat) &&
+    Number.isFinite(input.destinationLng) &&
+    normalizedDestinationAddress.length > 0 &&
+    !sameAsOrigin;
+
+  const destinationPending = input.destinationPending === true || !hasDestination;
+  const finalDestinationLat = hasDestination ? input.destinationLat : input.originLat;
+  const finalDestinationLng = hasDestination ? input.destinationLng : input.originLng;
+  const fallbackDestinationAddress = normalizedDestinationAddress || normalizedOriginAddress || "Ubicación de origen";
+  const finalDestinationAddress = hasDestination ? normalizedDestinationAddress : fallbackDestinationAddress;
+
+  return {
+    sameAsOrigin,
+    hasDestination,
+    destinationPending,
+    finalDestinationLat,
+    finalDestinationLng,
+    finalDestinationAddress,
+  };
+}
+
+export const MIN_FARE_COP = 5500;
+const FARE_INCREMENT_COP = 500;
+const AUTOMATIC_FARE_INCREMENT_COP = 1000;
+
+export function roundAutomaticFare(value: number): number {
+  return Math.max(MIN_FARE_COP, Math.ceil(value / AUTOMATIC_FARE_INCREMENT_COP) * AUTOMATIC_FARE_INCREMENT_COP);
+}
+
+/** Taxi reference used for the economical fare (80%, within the approved 75–85% range). */
+export function calculateEconomicalFare(distanceKm: number): number {
+  const taxiReference = 4500 + Math.max(0, distanceKm) * 1800;
+  return roundAutomaticFare(taxiReference * 0.8);
+}
+
+export function validateFare(value: unknown, minimum: number): number {
+  const fare = Number(value);
+  if (!Number.isFinite(fare) || fare < minimum || !Number.isInteger(fare) || fare % FARE_INCREMENT_COP !== 0) {
+    throw new Error(`La tarifa debe ser un múltiplo de ${FARE_INCREMENT_COP} COP y no menor a ${minimum} COP`);
+  }
+  return fare;
 }
 
 function formatTrip(
@@ -78,7 +182,10 @@ function formatTrip(
     destinationAddress: trip.destinationAddress ?? null,
     destinationPending: (trip as any).destinationPending === true,
     vehicleType: trip.vehicleType,
-    estimatedPrice: Number(trip.estimatedPrice),
+    estimatedPrice: trip.estimatedPrice != null ? Number(trip.estimatedPrice) : null,
+    minimumFare: (trip as any).minimumFare != null ? Number((trip as any).minimumFare) : null,
+    passengerOffer: (trip as any).passengerOffer != null ? Number((trip as any).passengerOffer) : null,
+    driverCounteroffer: (trip as any).driverCounteroffer != null ? Number((trip as any).driverCounteroffer) : null,
     finalPrice: trip.finalPrice != null ? Number(trip.finalPrice) : null,
     actualPrice: trip.actualPrice != null ? Number(trip.actualPrice) : null,
     distanceKm: trip.distanceKm != null ? Number(trip.distanceKm) : null,
@@ -140,6 +247,20 @@ function withinRadius(lat: number, lng: number, radiusKm = 1) {
  * - cash: all nearby online drivers
  * - nequi/daviplata/breve: only nearby drivers who have that method in acceptedPayments
  */
+async function getOnlineDriverIds(): Promise<number[]> {
+ const rows = await db
+   .select({ id: usersTable.id })
+   .from(usersTable)
+   .where(
+     and(
+       eq(usersTable.role, "driver"),
+       eq(usersTable.isOnline, true),
+       eq(usersTable.isActive, true),
+     )
+   );
+ return rows.map(r => r.id);
+}
+
 async function getEligibleDriverIds(
   paymentMethod: string,
   originLat: number,
@@ -206,33 +327,77 @@ router.post("/", authenticate, async (req, res) => {
   const {
     originLat, originLng, originAddress,
     destinationLat, destinationLng, destinationAddress,
-    vehicleType, paymentMethod, estimatedPrice,
+    vehicleType, paymentMethod,     estimatedPrice, passengerOffer,
+    destinationPending,
   } = req.body as {
     originLat: number; originLng: number; originAddress: string;
-    destinationLat: number; destinationLng: number; destinationAddress: string;
-    vehicleType: string; paymentMethod: string; estimatedPrice?: number;
+    destinationLat?: number; destinationLng?: number; destinationAddress?: string;
+    vehicleType: string; paymentMethod: string; estimatedPrice?: number; passengerOffer?: number;
+    destinationPending?: boolean;
   };
+
+  const destinationResolution = resolveTripDestination({
+    originLat,
+    originLng,
+    destinationLat,
+    destinationLng,
+    destinationAddress,
+    originAddress,
+    destinationPending,
+  });
+
+  const {
+    destinationPending: tripDestinationPending,
+    finalDestinationLat,
+    finalDestinationLng,
+    finalDestinationAddress,
+  } = destinationResolution;
+  const normalizedOriginAddress =
+    typeof originAddress === "string" && originAddress.trim()
+      ? originAddress.trim()
+      : "Ubicación de origen";
+
+  const distanceKm = destinationResolution.hasDestination
+    ? haversine(Number(originLat), Number(originLng), Number(finalDestinationLat), Number(finalDestinationLng))
+    : null;
+  const minimumFare = distanceKm == null ? null : calculateEconomicalFare(distanceKm);
+  let validatedOffer: number | null = null;
+  if (passengerOffer != null) {
+    if (minimumFare == null) {
+      res.status(400).json({ error: "No se puede proponer una tarifa sin destino" });
+      return;
+    }
+    try { validatedOffer = validateFare(passengerOffer, minimumFare); }
+    catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : "Oferta inválida" }); return; }
+  }
 
   const [trip] = await db.insert(tripsTable).values({
     passengerId: user.userId,
+    driverId: null,
+    status: "pending",
     originLat: String(originLat),
     originLng: String(originLng),
-    originAddress,
-    destinationLat: destinationLat != null ? String(destinationLat) : null,
-    destinationLng: destinationLng != null ? String(destinationLng) : null,
-    destinationAddress: destinationAddress ?? null,
-    destinationPending: (destinationLat == null && destinationLng == null && !destinationAddress) ? true : false,
+    originAddress: normalizedOriginAddress || "Ubicación de origen",
+    destinationLat: destinationResolution.hasDestination ? String(finalDestinationLat) : null,
+    destinationLng: destinationResolution.hasDestination ? String(finalDestinationLng) : null,
+    destinationAddress: destinationResolution.hasDestination ? finalDestinationAddress : null,
+    destinationPending: tripDestinationPending,
     vehicleType,
     paymentMethod,
-    estimatedPrice: String(estimatedPrice ?? 0),
-    status: "pending",
-  }).returning();
+    estimatedPrice: minimumFare == null ? null : String(minimumFare),
+    minimumFare: minimumFare == null ? null : String(minimumFare),
+    passengerOffer: validatedOffer == null ? null : String(validatedOffer),
+    distanceKm: distanceKm == null ? null : String(distanceKm),
+  } as any).returning();
 
   const enriched = await enrichTrip(trip);
 
-  // Notify only eligible online drivers within 1 km, filtered by payment method
+  // Notify immediately to nearby eligible drivers and, as a fallback, to all online drivers
+  // so the trip appears without waiting for slow reconnections or stale location data.
   const eligibleIds = await getEligibleDriverIds(paymentMethod ?? "cash", originLat, originLng);
-  for (const driverId of eligibleIds) {
+  const fallbackIds = eligibleIds.length > 0 ? eligibleIds : await getOnlineDriverIds();
+  const broadcastIds = [...new Set(fallbackIds)];
+  for (const driverId of broadcastIds) {
     io?.to(`user:${driverId}`).emit("trip:new_request", enriched);
   }
 
@@ -290,10 +455,11 @@ router.get("/:id", authenticate, async (req, res) => {
 router.patch("/:id/status", authenticate, async (req, res) => {
   const tripId = Number(req.params["id"]);
   const user = req.user!;
-  const { status, cancelReason, finalPrice } = req.body as {
+  const { status, cancelReason, finalPrice, fare } = req.body as {
     status: string;
     cancelReason?: string | null;
     finalPrice?: number | null;
+    fare?: number | null;
   };
 
   const [trip] = await db.select().from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
@@ -322,19 +488,26 @@ router.patch("/:id/status", authenticate, async (req, res) => {
   const updates: Partial<typeof tripsTable.$inferInsert> = { status };
 
   if (status === "accepted") {
-    // Verify the driver has an active subscription before allowing them to accept trips
-    const [activeSub] = await db
-      .select({ id: subscriptionsTable.id })
+    // Allow a driver without a subscription record to receive a starter trial automatically.
+    const [existingSub] = await db
+      .select({ id: subscriptionsTable.id, expiresAt: subscriptionsTable.expiresAt })
       .from(subscriptionsTable)
-      .where(
-        and(
-          eq(subscriptionsTable.driverId, user.userId),
-          gt(subscriptionsTable.expiresAt, new Date()),
-        )
-      )
+      .where(eq(subscriptionsTable.driverId, user.userId))
+      .orderBy(subscriptionsTable.expiresAt)
       .limit(1);
 
-    if (!activeSub) {
+    if (!existingSub) {
+      await ensureDriverHasStarterSubscription(user.userId);
+    }
+
+    const [activeSub] = await db
+      .select({ id: subscriptionsTable.id, expiresAt: subscriptionsTable.expiresAt })
+      .from(subscriptionsTable)
+      .where(eq(subscriptionsTable.driverId, user.userId))
+      .orderBy(subscriptionsTable.expiresAt)
+      .limit(1);
+
+    if (!activeSub || new Date(activeSub.expiresAt).getTime() <= Date.now()) {
       res.status(403).json({
         error: "Tu suscripción ha vencido. No puedes aceptar carreras.",
         code: "SUBSCRIPTION_REQUIRED",
@@ -342,13 +515,35 @@ router.patch("/:id/status", authenticate, async (req, res) => {
       return;
     }
 
+    const minimum = (trip as any).minimumFare == null ? null : Number((trip as any).minimumFare);
+    if (minimum == null) {
+      res.status(400).json({ error: "No se puede aceptar una carrera sin destino y tarifa" });
+      return;
+    }
+    const passengerFare = (trip as any).passengerOffer != null
+      ? Number((trip as any).passengerOffer)
+      : minimum;
+    const requestedFare = fare ?? ((trip as any).driverCounteroffer != null
+      ? Number((trip as any).driverCounteroffer)
+      : passengerFare);
+    try {
+      updates.finalPrice = String(validateFare(requestedFare, passengerFare));
+    }
+    catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : "Tarifa inválida" }); return; }
     updates.driverId = user.userId;
     updates.driverAcceptedAt = new Date();
   } else if (status === "in_progress") {
     updates.startedAt = new Date();
   } else if (status === "completed") {
     updates.completedAt = new Date();
-    if (finalPrice != null) updates.finalPrice = String(finalPrice);
+    if (finalPrice != null) {
+      if ((trip as any).minimumFare == null) {
+        res.status(400).json({ error: "No se puede registrar una tarifa sin destino" });
+        return;
+      }
+      try { updates.finalPrice = String(validateFare(finalPrice, Number((trip as any).minimumFare))); }
+      catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : "Tarifa inválida" }); return; }
+    }
   } else if (status === "cancelled") {
     updates.cancelledAt = new Date();
     if (cancelReason) updates.cancelReason = cancelReason;
@@ -382,9 +577,68 @@ router.patch("/:id/status", authenticate, async (req, res) => {
   res.json(enriched);
 });
 
+// Passenger offer and driver counteroffer are deliberately separate endpoints so
+// every fare mutation is validated on the server.
+router.post("/:id/offer", authenticate, async (req, res) => {
+  const tripId = Number(req.params["id"]);
+  const [trip] = await db.select().from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
+  if (!trip) { res.status(404).json({ error: "Trip not found" }); return; }
+  if (trip.passengerId !== req.user!.userId || (trip as any).minimumFare == null) {
+    res.status(403).json({ error: "Solo el pasajero puede ofertar en una carrera con destino" }); return;
+  }
+  try {
+    const offer = validateFare(req.body?.amount, Number((trip as any).minimumFare));
+    const [updated] = await db.update(tripsTable).set({ passengerOffer: String(offer), driverCounteroffer: null } as any)
+      .where(and(eq(tripsTable.id, tripId), eq(tripsTable.status, "pending"))).returning();
+    if (!updated) { res.status(409).json({ error: "La carrera ya no está disponible" }); return; }
+    const result = await enrichTrip(updated);
+    io?.to(`trip:${tripId}`).emit("trip_fare_updated", result);
+    res.json(result);
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : "Oferta inválida" }); }
+});
+
+router.post("/:id/counteroffer", authenticate, async (req, res) => {
+  const tripId = Number(req.params["id"]);
+  const [trip] = await db.select().from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
+  if (!trip) { res.status(404).json({ error: "Trip not found" }); return; }
+  if (req.user!.role !== "driver" || trip.status !== "pending" || (trip as any).minimumFare == null) {
+    res.status(403).json({ error: "Solo un conductor puede contraofertar una carrera pendiente" }); return;
+  }
+  const base = (trip as any).passengerOffer == null ? Number((trip as any).minimumFare) : Number((trip as any).passengerOffer);
+  try {
+    const counter = validateFare(req.body?.amount, base + FARE_INCREMENT_COP);
+    const [updated] = await db.update(tripsTable).set({ driverCounteroffer: String(counter) } as any)
+      .where(and(eq(tripsTable.id, tripId), eq(tripsTable.status, "pending"))).returning();
+    if (!updated) { res.status(409).json({ error: "La carrera ya no está disponible" }); return; }
+    const result = await enrichTrip(updated);
+    io?.to(`trip:${tripId}`).emit("trip_fare_updated", result);
+    io?.to(`user:${trip.passengerId}`).emit("trip_fare_updated", result);
+    res.json(result);
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : "Contraoferta inválida" }); }
+});
+
 // GET /api/trips/:id/messages
 router.get("/:id/messages", authenticate, async (req, res) => {
   const tripId = Number(req.params["id"]);
+  const user = req.user!;
+  const [trip] = await db.select().from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
+
+  if (!trip) {
+    res.status(404).json({ error: "Trip not found" });
+    return;
+  }
+
+  const isParticipant = trip.passengerId === user.userId || trip.driverId === user.userId;
+  if (!isParticipant) {
+    res.status(403).json({ error: "Only trip participants can access this chat" });
+    return;
+  }
+
+  if (!ACTIVE_CHAT_STATUSES.includes(trip.status as typeof ACTIVE_CHAT_STATUSES[number])) {
+    res.json([]);
+    return;
+  }
+
   const messages = await db
     .select()
     .from(messagesTable)
@@ -402,6 +656,7 @@ router.get("/:id/messages", authenticate, async (req, res) => {
     tripId: m.tripId,
     senderId: m.senderId,
     content: m.content,
+    attachments: m.attachments ?? [],
     senderName: senderMap.get(m.senderId) ?? "Unknown",
     createdAt: m.createdAt.toISOString(),
   })));
@@ -410,17 +665,41 @@ router.get("/:id/messages", authenticate, async (req, res) => {
 // POST /api/trips/:id/messages
 router.post("/:id/messages", authenticate, async (req, res) => {
   const tripId = Number(req.params["id"]);
-  const { content } = req.body as { content: string };
+  const { content, attachments } = req.body as { content: string; attachments?: IncomingAttachment[] };
   const user = req.user!;
 
-  if (!content?.trim()) {
-    res.status(400).json({ error: "content is required" });
+  if (!content?.trim() && !attachments?.length) {
+    res.status(400).json({ error: "content or attachments are required" });
     return;
   }
 
+  const [trip] = await db.select().from(tripsTable).where(eq(tripsTable.id, tripId)).limit(1);
+  if (!trip) {
+    res.status(404).json({ error: "Trip not found" });
+    return;
+  }
+
+  const isParticipant = trip.passengerId === user.userId || trip.driverId === user.userId;
+  if (!isParticipant) {
+    res.status(403).json({ error: "Only trip participants can use this chat" });
+    return;
+  }
+
+  if (!ACTIVE_CHAT_STATUSES.includes(trip.status as typeof ACTIVE_CHAT_STATUSES[number])) {
+    res.status(409).json({ error: "Trip chat is available after a driver accepts the trip" });
+    return;
+  }
+
+  let savedAttachments;
+  try {
+    savedAttachments = await saveAttachments(attachments, "trips");
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Invalid attachments" });
+    return;
+  }
   const [message] = await db
     .insert(messagesTable)
-    .values({ tripId, senderId: user.userId, content: content.trim() })
+    .values({ tripId, senderId: user.userId, content: content?.trim() ?? "", attachments: savedAttachments })
     .returning();
 
   const [sender] = await db.select().from(usersTable).where(eq(usersTable.id, user.userId)).limit(1);
@@ -430,6 +709,7 @@ router.post("/:id/messages", authenticate, async (req, res) => {
     tripId: message.tripId,
     senderId: message.senderId,
     content: message.content,
+    attachments: message.attachments ?? [],
     senderName: sender?.name ?? "Unknown",
     createdAt: message.createdAt.toISOString(),
   };
@@ -438,6 +718,21 @@ router.post("/:id/messages", authenticate, async (req, res) => {
   io?.to(`trip:${tripId}`).emit("message:new", formatted);
 
   res.status(201).json(formatted);
+});
+
+router.get("/attachments/:filename", authenticate, async (req, res) => {
+  const filename = path.basename(String(req.params["filename"]));
+  const [message] = await db.select({ tripId: messagesTable.tripId, attachments: messagesTable.attachments })
+    .from(messagesTable).where(sql`${messagesTable.attachments}::text LIKE ${`%${filename}%`}`).limit(1);
+  const metadata = message?.attachments?.find(file => file.url.endsWith(`/${filename}`));
+  if (!message || !metadata) { res.status(404).json({ error: "Attachment not found" }); return; }
+  const [trip] = await db.select().from(tripsTable).where(eq(tripsTable.id, message.tripId)).limit(1);
+  const user = req.user!;
+  if (!trip || (trip.passengerId !== user.userId && trip.driverId !== user.userId && user.role !== "admin")) {
+    res.status(403).json({ error: "Forbidden" }); return;
+  }
+  try { res.type(metadata.mimeType); res.send(await readFile(path.join(uploadDir, filename))); }
+  catch { res.status(404).json({ error: "Attachment not found" }); }
 });
 
 // POST /api/trips/:id/actual-price — passenger reports the real price paid

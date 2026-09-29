@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ScrollView,
-  ActivityIndicator, Modal, TextInput,
+  ActivityIndicator, Modal, TextInput, Linking,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -10,7 +10,9 @@ import colors from '@/constants/colors';
 import { Feather } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL ?? `https://${process.env.EXPO_PUBLIC_DOMAIN}`).replace(/\/api\/?$/i, '').replace(/\/$/, '') + '/api';
+import { getApiUrl } from '@/lib/api-config';
+
+const BASE_URL = getApiUrl();
 
 type DigitalPayment = 'nequi' | 'daviplata' | 'breve';
 
@@ -48,7 +50,7 @@ function formatCOP(n: number) {
   return new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n);
 }
 
-function SubscriptionCard({ sub }: { sub: SubInfo }) {
+function SubscriptionCard({ sub, onRenew }: { sub: SubInfo; onRenew?: () => void }) {
   const statusColor = !sub.isActive
     ? colors.light.destructive
     : sub.isTrial
@@ -102,11 +104,18 @@ function SubscriptionCard({ sub }: { sub: SubInfo }) {
         </Text>
       </View>
 
+      {(!sub.isActive || sub.daysRemaining <= 5) && onRenew && (
+        <TouchableOpacity style={styles.renewBtn} onPress={onRenew} activeOpacity={0.85}>
+          <Feather name="credit-card" size={15} color={colors.light.primaryForeground} />
+          <Text style={styles.renewBtnText}>Pagar renovación</Text>
+        </TouchableOpacity>
+      )}
+
       {!sub.isActive && (
         <View style={styles.subExpiredBanner}>
           <Feather name="alert-circle" size={14} color={colors.light.destructive} />
           <Text style={styles.subExpiredText}>
-            Tu suscripción venció. Contacta al administrador para renovar tu plan y volver a conectarte.
+            Tu suscripción venció. Paga en línea para volver a activar tu plan y seguir recibiendo viajes.
           </Text>
         </View>
       )}
@@ -231,6 +240,145 @@ function PaymentMethodsCard({
 
 const PLATE_REGEX = /^[A-Z]{3}[0-9]{3}$/;
 
+const RENEWAL_PLANS = [
+  { key: 'daily', label: 'Diario', priceCop: 3000, days: 1 },
+  { key: 'weekly', label: 'Semanal', priceCop: 12500, days: 7 },
+  { key: 'biweekly', label: 'Quincenal', priceCop: 20000, days: 15 },
+  { key: 'monthly', label: 'Mensual', priceCop: 30000, days: 30 },
+] as const;
+
+const RENEWAL_PAYMENT_OPTIONS = [
+  { key: 'pse', label: 'PSE', icon: '🏦' },
+  { key: 'tarjeta', label: 'Tarjeta', icon: '💳' },
+  { key: 'nequi', label: 'Nequi', icon: '💜' },
+  { key: 'daviplata', label: 'Daviplata', icon: '🔴' },
+] as const;
+
+function RenewalSubscriptionModal({
+  visible,
+  onClose,
+  onRenewed,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onRenewed: () => void;
+}) {
+  const [selectedPlan, setSelectedPlan] = useState<(typeof RENEWAL_PLANS)[number]['key']>('monthly');
+  const [selectedMethod, setSelectedMethod] = useState<(typeof RENEWAL_PAYMENT_OPTIONS)[number]['key']>('pse');
+  const [saving, setSaving] = useState(false);
+
+  const selectedPlanDetails = RENEWAL_PLANS.find(plan => plan.key === selectedPlan)!;
+  const total = selectedPlanDetails.priceCop;
+
+  const handleSubmit = async () => {
+    setSaving(true);
+    try {
+      const token = await AsyncStorage.getItem('auth_token');
+      const res = await fetch(`${BASE_URL}/drivers/renew-subscription`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: token ? 'Bearer ' + token : '',
+        },
+        body: JSON.stringify({ plan: selectedPlan, paymentMethod: selectedMethod }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        Alert.alert('No se pudo procesar el pago', body.error ?? 'Inténtalo de nuevo.');
+        return;
+      }
+
+      if (body.status === 'pending_payment' && body.checkoutUrl) {
+        Alert.alert(
+          'Completa el pago',
+          'Serás redirigido a la pasarela de pagos para confirmar la renovación de tu suscripción.',
+          [
+            { text: 'Cancelar', style: 'cancel' },
+            { text: 'Ir a pagar', onPress: () => Linking.openURL(body.checkoutUrl) },
+          ],
+        );
+        onRenewed();
+        onClose();
+        return;
+      }
+
+      Alert.alert('Pago realizado', `Tu suscripción ${selectedPlanDetails.label.toLowerCase()} quedó activa con ${RENEWAL_PAYMENT_OPTIONS.find(opt => opt.key === selectedMethod)?.label ?? 'pago online'}.`);
+      onRenewed();
+      onClose();
+    } catch {
+      Alert.alert('Error', 'No se pudo conectar con el servidor de pagos.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalCard}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Pagar suscripción</Text>
+            <TouchableOpacity onPress={onClose} style={styles.modalCloseBtn}>
+              <Feather name="x" size={20} color={colors.light.mutedForeground} />
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.modalField}>
+            <Text style={styles.modalLabel}>Selecciona el plan</Text>
+            <View style={styles.planGrid}>
+              {RENEWAL_PLANS.map(plan => (
+                <TouchableOpacity
+                  key={plan.key}
+                  style={[styles.planOption, selectedPlan === plan.key && styles.planOptionActive]}
+                  onPress={() => setSelectedPlan(plan.key)}
+                  activeOpacity={0.9}
+                >
+                  <Text style={[styles.planOptionTitle, selectedPlan === plan.key && styles.planOptionTitleActive]}>{plan.label}</Text>
+                  <Text style={[styles.planOptionPrice, selectedPlan === plan.key && styles.planOptionPriceActive]}>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(plan.priceCop)}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          <View style={styles.modalField}>
+            <Text style={styles.modalLabel}>Método de pago</Text>
+            <View style={styles.payGrid}>
+              {RENEWAL_PAYMENT_OPTIONS.map(method => (
+                <TouchableOpacity
+                  key={method.key}
+                  style={[styles.payOption, selectedMethod === method.key && styles.payOptionActive]}
+                  onPress={() => setSelectedMethod(method.key)}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.payOptionIcon}>{method.icon}</Text>
+                  <Text style={[styles.payOptionText, selectedMethod === method.key && styles.payOptionTextActive]}>{method.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          <View style={styles.checkoutCard}>
+            <Text style={styles.checkoutLabel}>Total a pagar</Text>
+            <Text style={styles.checkoutValue}>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(total)}</Text>
+          </View>
+
+          <View style={styles.modalActions}>
+            <TouchableOpacity style={styles.modalCancelBtn} onPress={onClose} disabled={saving}>
+              <Text style={styles.modalCancelText}>Cancelar</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.modalSaveBtn} onPress={handleSubmit} disabled={saving}>
+              {saving
+                ? <ActivityIndicator size="small" color={colors.light.primaryForeground} />
+                : <Text style={styles.modalSaveText}>Pagar ahora</Text>
+              }
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function VehicleModal({
   visible,
   onClose,
@@ -271,7 +419,7 @@ function VehicleModal({
       const token = await AsyncStorage.getItem('auth_token');
       const res = await fetch(`${BASE_URL}/vehicles`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '', },
         body: JSON.stringify({ plate: trimmedPlate, brand: brand.trim(), model: model.trim(), color: 'Amarillo', vehicleType: 'taxi' }),
       });
       const body = await res.json();
@@ -380,6 +528,7 @@ export default function ProfileScreen() {
   const { user, logout, updateUser } = useAuth();
   const queryClient = useQueryClient();
   const [showVehicleModal, setShowVehicleModal] = useState(false);
+  const [showRenewModal, setShowRenewModal] = useState(false);
 
   const {
     data: subscription,
@@ -390,7 +539,7 @@ export default function ProfileScreen() {
     queryFn: async () => {
       const token = await AsyncStorage.getItem('auth_token');
       const res = await fetch(`${BASE_URL}/drivers/me/subscription`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: token ? 'Bearer ' + token : '', },
       });
       if (!res.ok) throw new Error('no subscription');
       return res.json();
@@ -403,7 +552,7 @@ export default function ProfileScreen() {
     const token = await AsyncStorage.getItem('auth_token');
     const res = await fetch(`${BASE_URL}/drivers/payment-methods`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '', },
       body: JSON.stringify({ acceptedPayments: methods }),
     });
     if (!res.ok) throw new Error('save failed');
@@ -469,7 +618,10 @@ export default function ProfileScreen() {
 
       {/* Subscription card — drivers only */}
       {user.role === 'driver' && !subLoading && subscription && (
-        <SubscriptionCard sub={subscription} />
+        <SubscriptionCard
+          sub={subscription}
+          onRenew={() => setShowRenewModal(true)}
+        />
       )}
       {user.role === 'driver' && !subLoading && subError && (
         <View style={styles.noSubCard}>
@@ -499,6 +651,11 @@ export default function ProfileScreen() {
         visible={showVehicleModal}
         onClose={() => setShowVehicleModal(false)}
         onRegistered={() => queryClient.invalidateQueries({ queryKey: ['my-subscription'] })}
+      />
+      <RenewalSubscriptionModal
+        visible={showRenewModal}
+        onClose={() => setShowRenewModal(false)}
+        onRenewed={() => queryClient.invalidateQueries({ queryKey: ['my-subscription'] })}
       />
 
       {/* Prominent warning when driver has no subscription at all */}
@@ -731,4 +888,46 @@ const styles = StyleSheet.create({
     backgroundColor: colors.light.primary,
   },
   modalSaveText: { fontSize: 15, fontWeight: '700', color: colors.light.primaryForeground, fontFamily: 'Inter_700Bold' },
+  // Renew subscription button
+  renewBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    backgroundColor: colors.light.primary, borderRadius: colors.radius,
+    paddingVertical: 12, marginTop: 8,
+  },
+  renewBtnText: { fontSize: 14, fontWeight: '700', color: colors.light.primaryForeground, fontFamily: 'Inter_700Bold' },
+  // Renewal modal — plan grid
+  planGrid: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
+  planOption: {
+    flex: 1, minWidth: '48%', paddingVertical: 12, paddingHorizontal: 10,
+    borderRadius: colors.radius, borderWidth: 2, borderColor: colors.light.border,
+    backgroundColor: colors.light.secondary, alignItems: 'center', gap: 4,
+  },
+  planOptionActive: {
+    borderColor: colors.light.primary, backgroundColor: colors.light.primary + '15',
+  },
+  planOptionTitle: { fontSize: 14, fontWeight: '600', color: colors.light.foreground, fontFamily: 'Inter_600SemiBold' },
+  planOptionTitleActive: { color: colors.light.primary, fontWeight: '700' },
+  planOptionPrice: { fontSize: 13, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
+  planOptionPriceActive: { color: colors.light.primary, fontWeight: '600' },
+  // Payment method grid
+  payGrid: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
+  payOption: {
+    flex: 1, minWidth: '45%', paddingVertical: 10, paddingHorizontal: 8,
+    borderRadius: colors.radius, borderWidth: 2, borderColor: colors.light.border,
+    backgroundColor: colors.light.secondary, alignItems: 'center', gap: 4,
+  },
+  payOptionActive: {
+    borderColor: colors.light.primary, backgroundColor: colors.light.primary + '15',
+  },
+  payOptionIcon: { fontSize: 24 },
+  payOptionText: { fontSize: 12, color: colors.light.foreground, fontFamily: 'Inter_600SemiBold', textAlign: 'center' },
+  payOptionTextActive: { color: colors.light.primary, fontWeight: '700' },
+  // Checkout summary card
+  checkoutCard: {
+    backgroundColor: colors.light.primary + '10', borderWidth: 1, borderColor: colors.light.primary + '30',
+    borderRadius: colors.radius, paddingVertical: 16, paddingHorizontal: 14,
+    alignItems: 'center', gap: 4,
+  },
+  checkoutLabel: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
+  checkoutValue: { fontSize: 24, fontWeight: '700', color: colors.light.primary, fontFamily: 'Inter_700Bold' },
 });

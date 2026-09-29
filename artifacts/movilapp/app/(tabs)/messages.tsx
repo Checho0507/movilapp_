@@ -11,7 +11,9 @@ import { useAuth } from '@/context/AuthContext';
 import { useSocket } from '@/context/SocketContext';
 import colors from '@/constants/colors';
 
-const BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL ?? `https://${process.env.EXPO_PUBLIC_DOMAIN}`).replace(/\/api\/?$/i, '').replace(/\/$/, '') + '/api';
+import { getApiUrl } from '@/lib/api-config';
+
+const BASE_URL = getApiUrl();
 
 interface Conversation {
   id: number;
@@ -31,7 +33,7 @@ interface Conversation {
 
 async function fetchConversations(token: string): Promise<Conversation[]> {
   const res = await fetch(`${BASE_URL}/conversations`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: token ? 'Bearer ' + token : '', },
   });
   if (!res.ok) throw new Error('Error al cargar conversaciones');
   return res.json();
@@ -40,7 +42,7 @@ async function fetchConversations(token: string): Promise<Conversation[]> {
 async function createSupportConversation(token: string): Promise<Conversation> {
   const res = await fetch(`${BASE_URL}/conversations`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers: { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '', },
     body: JSON.stringify({ type: 'support', subject: 'Consulta de soporte' }),
   });
   if (!res.ok) throw new Error('Error al crear conversación');
@@ -103,15 +105,21 @@ export default function MessagesScreen() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const token = await AsyncStorage.getItem('auth_token');
-      if (!token) return;
+      if (!token) {
+        setConversations([]);
+        setLoadError(true);
+        return;
+      }
       const data = await fetchConversations(token);
       setConversations(data);
-    } catch (e) {
-      // silent
+      setLoadError(false);
+    } catch {
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -174,13 +182,13 @@ export default function MessagesScreen() {
     }
   };
 
-  const hasSupport = conversations.some(c => c.type === 'support');
+  const hasSupport = conversations.some(c => c.type === 'support' && c.status === 'open');
 
   return (
     <View style={[styles.root, { paddingTop: insets.top + (Platform.OS === 'web' ? 67 : 0) }]}>
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Mensajes</Text>
+        <Text style={styles.headerTitle}>Ayuda y mensajes</Text>
       </View>
 
       {/* Support CTA for drivers — always visible if no open support conv */}
@@ -231,18 +239,33 @@ export default function MessagesScreen() {
           data={conversations}
           keyExtractor={item => String(item.id)}
           renderItem={({ item }) => <ConvCard conv={item} myId={user?.id ?? 0} />}
-          contentContainerStyle={styles.list}
+          contentContainerStyle={[
+            styles.list,
+            { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) },
+            conversations.length === 0 && styles.listEmpty,
+          ]}
           ItemSeparatorComponent={() => <View style={styles.separator} />}
           ListEmptyComponent={
-            <View style={styles.empty}>
-              <Feather name="message-square" size={44} color={colors.light.mutedForeground} />
-              <Text style={styles.emptyTitle}>Sin mensajes</Text>
-              <Text style={styles.emptySub}>
-                {user?.role === 'driver'
-                  ? 'Usa el botón de arriba para contactar a la administración'
-                  : 'Tus conversaciones aparecerán aquí'}
-              </Text>
-            </View>
+            loadError ? (
+              <View style={styles.empty}>
+                <Feather name="wifi-off" size={44} color={colors.light.destructive} />
+                <Text style={styles.emptyTitle}>No pudimos cargar tus mensajes</Text>
+                <Text style={styles.emptySub}>Revisa tu conexión e inténtalo de nuevo.</Text>
+                <TouchableOpacity style={styles.retryBtn} onPress={() => { setLoading(true); load(); }}>
+                  <Text style={styles.retryText}>Reintentar</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={styles.empty}>
+                <Feather name="message-square" size={44} color={colors.light.mutedForeground} />
+                <Text style={styles.emptyTitle}>Sin mensajes</Text>
+                <Text style={styles.emptySub}>
+                  {user?.role === 'driver'
+                    ? 'Usa el botón de arriba para contactar a la administración'
+                    : 'Tus conversaciones aparecerán aquí'}
+                </Text>
+              </View>
+            )
           }
         />
       )}
@@ -275,7 +298,8 @@ const styles = StyleSheet.create({
   },
   supportCTATitle: { fontSize: 15, fontWeight: '700', color: '#fff', fontFamily: 'Inter_700Bold' },
   supportCTASub: { fontSize: 12, color: 'rgba(255,255,255,0.8)', fontFamily: 'Inter_400Regular', marginTop: 2 },
-  list: { paddingBottom: 120 },
+  list: { paddingTop: 4 },
+  listEmpty: { flexGrow: 1 },
   convCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -314,4 +338,12 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', paddingTop: 80, paddingHorizontal: 40, gap: 12 },
   emptyTitle: { fontSize: 18, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
   emptySub: { fontSize: 14, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', textAlign: 'center', lineHeight: 22 },
+  retryBtn: {
+    marginTop: 4,
+    backgroundColor: colors.light.primary,
+    borderRadius: 10,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+  },
+  retryText: { color: colors.light.primaryForeground, fontSize: 14, fontFamily: 'Inter_600SemiBold' },
 });

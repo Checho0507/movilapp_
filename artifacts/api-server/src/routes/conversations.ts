@@ -1,9 +1,12 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { conversationsTable, conversationMessagesTable, usersTable } from "@workspace/db";
-import { eq, and, or, desc, inArray } from "drizzle-orm";
+import { eq, and, or, desc, inArray, sql } from "drizzle-orm";
 import { authenticate } from "../lib/auth.js";
 import type { Server as IOServer } from "socket.io";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { uploadDir, saveAttachments, type IncomingAttachment } from "../lib/attachments.js";
 
 const router = Router();
 
@@ -207,6 +210,7 @@ router.get("/:id/messages", authenticate, async (req, res) => {
       senderName: senderMap.get(m.senderId)?.name ?? "Usuario",
       senderRole: senderMap.get(m.senderId)?.role ?? "passenger",
       content: m.content,
+      attachments: m.attachments ?? [],
       createdAt: m.createdAt.toISOString(),
     })),
   );
@@ -216,10 +220,10 @@ router.get("/:id/messages", authenticate, async (req, res) => {
 router.post("/:id/messages", authenticate, async (req, res) => {
   const convId = Number(req.params["id"]);
   const user = req.user!;
-  const { content } = req.body as { content: string };
+  const { content, attachments } = req.body as { content: string; attachments?: IncomingAttachment[] };
 
-  if (!content?.trim()) {
-    res.status(400).json({ error: "content is required" });
+  if (!content?.trim() && !attachments?.length) {
+    res.status(400).json({ error: "content or attachments are required" });
     return;
   }
 
@@ -248,9 +252,16 @@ router.post("/:id/messages", authenticate, async (req, res) => {
     return;
   }
 
+  let savedAttachments;
+  try {
+    savedAttachments = await saveAttachments(attachments);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Invalid attachments" });
+    return;
+  }
   const [msg] = await db
     .insert(conversationMessagesTable)
-    .values({ conversationId: convId, senderId: user.userId, content: content.trim() })
+    .values({ conversationId: convId, senderId: user.userId, content: content?.trim() ?? "", attachments: savedAttachments })
     .returning();
 
   // Bump conversation updatedAt so it sorts to top
@@ -267,11 +278,35 @@ router.post("/:id/messages", authenticate, async (req, res) => {
     senderName: sender?.name ?? "Usuario",
     senderRole: sender?.role ?? "passenger",
     content: msg.content,
+    attachments: msg.attachments ?? [],
     createdAt: msg.createdAt.toISOString(),
   };
 
   await emitToParticipants("conv:message", { conversationId: convId, message: formatted }, conv);
   res.status(201).json(formatted);
+});
+
+// Files use unguessable UUID names; conversation authorization is enforced when
+// creating messages, while this endpoint allows native image/document previews.
+router.get("/attachments/:filename", authenticate, async (req, res) => {
+  const filename = path.basename(String(req.params["filename"]));
+  const user = req.user!;
+  const allowed = user.role === "admin"
+    ? await db.select({ id: conversationsTable.id }).from(conversationsTable)
+    : await db.select({ id: conversationsTable.id }).from(conversationsTable).where(or(eq(conversationsTable.userId, user.userId), eq(conversationsTable.otherUserId, user.userId)));
+  const ids = allowed.map(row => row.id);
+  const [ownerMessage] = ids.length ? await db.select({ attachments: conversationMessagesTable.attachments })
+    .from(conversationMessagesTable)
+    .where(and(inArray(conversationMessagesTable.conversationId, ids), sql`${conversationMessagesTable.attachments}::text LIKE ${`%${filename}%`}`)).limit(1) : [];
+  const metadata = ownerMessage?.attachments?.find(file => file.url.endsWith(`/${filename}`));
+  if (!metadata) { res.status(403).json({ error: "Forbidden" }); return; }
+  try {
+    const data = await readFile(path.join(uploadDir, filename));
+    res.type(metadata.mimeType);
+    res.send(data);
+  } catch {
+    res.status(404).json({ error: "Attachment not found" });
+  }
 });
 
 // PATCH /api/conversations/:id  — resolve / reopen

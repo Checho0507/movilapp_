@@ -4,27 +4,82 @@ import {
   Platform, Alert, Animated, Vibration, Image, TextInput, ScrollView, Keyboard,
   KeyboardAvoidingView,
 } from 'react-native';
-import { MapView, Marker, PROVIDER_DEFAULT } from '@/lib/maps';
+import { MapView, Marker, UrlTile } from '@/lib/maps';
 import type { Region } from '@/lib/maps';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
+import Svg, { Path, Rect, Circle } from 'react-native-svg';
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Speech from 'expo-speech';
 import { useCreateTrip, useUpdateDriverStatus, useUpdateDriverLocation, useUpdateTripStatus } from '@workspace/api-client-react';
 import { useAuth } from '@/context/AuthContext';
 import { useSocket } from '@/context/SocketContext';
 import colors from '@/constants/colors';
+import { getApiUrl, getMapTileUrl } from '@/lib/api-config';
+import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 
 const BOGOTA: Region = { latitude: 4.711, longitude: -74.0721, latitudeDelta: 0.06, longitudeDelta: 0.06 };
 const DRIVER_ACCEPT_RADIUS_KM = 1;
-
+const MAP_TILE_URL = getMapTileUrl();
 const PAYMENT_OPTIONS = [
-  { key: 'cash', label: 'Efectivo', icon: '💵' },
-  { key: 'card', label: 'Tarjeta', icon: '💳' },
+  { key: 'cash', label: 'Efectivo' },
+  { key: 'transfer', label: 'Transferencia' },
 ] as const;
 
-type PaymentKey = typeof PAYMENT_OPTIONS[number]['key'];
+const TRANSFER_OPTIONS = [
+  { key: 'nequi', label: 'Nequi' },
+  { key: 'daviplata', label: 'Daviplata' },
+  { key: 'breve', label: 'Breve' },
+] as const;
+
+type PaymentKey = 'cash' | 'transfer';
+type TransferKey = typeof TRANSFER_OPTIONS[number]['key'];
+
+function PaymentIcon({ type }: { type: 'cash' | 'transfer' | 'nequi' | 'daviplata' | 'breve' }) {
+  const yellow = '#F6C949';
+  const yellowSoft = '#F0B400';
+  const dark = '#1E1B18';
+
+  if (type === 'cash') {
+    return (
+      <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+        <Rect x="3.5" y="6" width="17" height="12" rx="2.5" fill={yellow} />
+        <Path d="M7 10.5H15.5C16.88 10.5 18 9.38 18 8V7.5H9.5C8.12 7.5 7 8.62 7 10V10.5Z" fill={yellowSoft} opacity={0.8} />
+        <Path d="M8 14.5H16.5M8 17.5H14" stroke={dark} strokeWidth="1.6" strokeLinecap="round" />
+        <Circle cx="17.5" cy="10" r="1.8" fill={dark} />
+      </Svg>
+    );
+  }
+
+  if (type === 'transfer') {
+    return (
+      <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+        <Rect x="4" y="5" width="12" height="14" rx="2.8" fill={yellow} />
+        <Rect x="8" y="3.5" width="12" height="14" rx="2.8" fill={yellowSoft} opacity={0.95} />
+        <Path d="M9 10.5L7.5 9L9 7.5M15 13.5L16.5 15L15 16.5" stroke={dark} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        <Path d="M7.5 9H13.5C15.16 9 16.5 10.34 16.5 12V13M16.5 15H10.5C8.84 15 7.5 13.66 7.5 12V11" stroke={dark} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </Svg>
+    );
+  }
+
+  const accent = type === 'nequi' ? '#F7D449' : type === 'daviplata' ? '#F0B400' : '#F8E27F';
+  return (
+    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+      <Circle cx="12" cy="12" r="8" fill={yellow} />
+      <Path d="M8.5 8.5H15.5V10.3H12.5V15.5H10.7V10.3H8.5V8.5Z" fill={dark} />
+      <Circle cx="16.2" cy="7.5" r="2.2" fill={accent} opacity={0.65} />
+    </Svg>
+  );
+}
+
+function getPaymentInfo(method?: string) {
+  if (method === 'cash') return { kind: 'cash' as const, label: 'Efectivo' };
+  const transferMatch = TRANSFER_OPTIONS.find(opt => opt.key === method);
+  if (transferMatch) return { kind: method as 'nequi' | 'daviplata' | 'breve', label: `Transferencia (${transferMatch.label})` };
+  return { kind: 'cash' as const, label: 'Efectivo' };
+}
 
 type Step = 'idle' | 'selectOrigin' | 'selectDest' | 'confirm' | 'searching' | 'no_drivers';
 type Pin = { lat: number; lng: number; address: string };
@@ -32,59 +87,165 @@ type Pin = { lat: number; lng: number; address: string };
 type SearchResult = { lat: number; lng: number; address: string };
 
 const NOMINATIM = 'https://nominatim.openstreetmap.org';
+const NOMINATIM_TIMEOUT_MS = 6000;
 const UA = { 'User-Agent': 'MovilApp/1.0' };
+const geocodeCache = new Map<string, SearchResult[]>();
 
 // Expand common Colombian address abbreviations so the geocoder understands them
 function normalizeAddress(raw: string): string {
   let s = ' ' + raw.trim() + ' ';
   const subs: [RegExp, string][] = [
-    [/\s(cra|cr|kra|kr|carr)\.?(?=[\s\d#])/gi, ' Carrera'],
-    [/\s(cll|cl|cle)\.?(?=[\s\d#])/gi, ' Calle'],
-    [/\s(av|avda)\.?(?=[\s\d#])/gi, ' Avenida'],
-    [/\s(dg|diag)\.?(?=[\s\d#])/gi, ' Diagonal'],
-    [/\s(tv|transv|trans)\.?(?=[\s\d#])/gi, ' Transversal'],
-    [/\s(no|nro|num)\.?(?=[\s\d#])/gi, ' #'],
+    [/\s(cra|cr|kra|kr|carr|carrea)\.? (?=[\s\d#])/gi, ' Carrera '],
+    [/\s(cll|cl|cle)\.? (?=[\s\d#])/gi, ' Calle '],
+    [/\s(av|avda)\.? (?=[\s\d#])/gi, ' Avenida '],
+    [/\s(dg|diag)\.? (?=[\s\d#])/gi, ' Diagonal '],
+    [/\s(tv|transv|trans)\.? (?=[\s\d#])/gi, ' Transversal '],
+    [/\s(no|nro|num)\.? (?=[\s\d#])/gi, ' # '],
   ];
   for (const [re, rep] of subs) s = s.replace(re, rep);
-  // "#11A09" / "# 11A-09" → "# 11A-09" (insert dash between cross-street number and house number)
+  s = s.replace(/(Carrera|Calle|Avenida|Diagonal|Transversal)\s+(\d+[a-zA-Z]{0,2})\s+(\d+)\s+(\d+)/gi, '$1 $2 # $3-$4');
   s = s.replace(/#\s*(\d+[a-zA-Z]?)\s*[-–]?\s*(\d+)/g, '# $1-$2');
+  s = s.replace(/#\s*(\d+[a-zA-Z]?)\s+(\d+)/g, '# $1-$2');
   return s.replace(/\s+/g, ' ').trim();
 }
 
 // Parse "Carrera 44 # 11A-09" → main street + implied cross street (Calle 11A)
+// Handle both the standard form and the common shorthand that omits the dash: "#11A09".
 function parseColombianAddress(normalized: string): { main: string; cross: string; plate: string } | null {
-  const m = normalized.match(/(Carrera|Calle|Avenida|Diagonal|Transversal)\s+(\d+[a-zA-Z]{0,2})\s*(bis)?\s*#\s*(\d+[a-zA-Z]{0,2})\s*-\s*(\d+)/i);
-  if (!m) return null;
-  const [, type, num, bis, crossNum, house] = m;
-  const t = type.toLowerCase();
-  // In Colombian nomenclature, Carreras cross Calles and vice versa
-  const crossType = (t === 'carrera' || t === 'transversal') ? 'Calle' : 'Carrera';
-  const mainName = bis ? `${type} ${num} Bis` : `${type} ${num}`;
-  return {
-    main: mainName,
-    cross: `${crossType} ${crossNum}`,
-    plate: `${mainName} # ${crossNum}-${house}`,
-  };
+  const patterns = [
+    /(Carrera|Calle|Avenida|Diagonal|Transversal)\s+(\d+[a-zA-Z]{0,2})\s*(bis)?\s*#\s*(\d+[a-zA-Z]{0,2})\s*-\s*(\d+)/i,
+    /(Carrera|Calle|Avenida|Diagonal|Transversal)\s+(\d+[a-zA-Z]{0,2})\s*(bis)?\s*#\s*(\d+[a-zA-Z]{0,2})(\d+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const m = normalized.match(pattern);
+    if (!m) continue;
+    const [, type, num, bis, crossNum, house] = m;
+    const t = type.toLowerCase();
+    // In Colombian nomenclature, Carreras cross Calles and vice versa.
+    const crossType = (t === 'carrera' || t === 'transversal') ? 'Calle' : 'Carrera';
+    const mainName = bis ? `${type} ${num} Bis` : `${type} ${num}`;
+    return {
+      main: mainName,
+      cross: `${crossType} ${crossNum}`,
+      plate: `${mainName} # ${crossNum}-${house}`,
+    };
+  }
+
+  return null;
 }
 
-async function nominatimSearch(params: string, limit = 6): Promise<any[]> {
+async function nominatimSearch(params: string, limit = 6, signal?: AbortSignal): Promise<any[]> {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+
+  const timer = setTimeout(() => controller.abort(), NOMINATIM_TIMEOUT_MS);
+
   try {
     const res = await fetch(
       `${NOMINATIM}/search?format=json&limit=${limit}&countrycodes=co&accept-language=es&${params}`,
-      { headers: UA },
+      { headers: UA, signal: controller.signal },
     );
     const data = await res.json();
     return Array.isArray(data) ? data : [];
   } catch {
     return [];
+  } finally {
+    if (signal) signal.removeEventListener('abort', onAbort);
+    clearTimeout(timer);
   }
 }
 
+function normalizeCityName(city: string | null): string | null {
+  if (!city) return null;
+  const cleaned = city
+    .replace(/^(perímetro\s+urbano|perimetro\s+urbano|urbano\s+|area\s+urbana\s+)/gi, '')
+    .replace(/^\s*[-,\s]+|[-,\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned || null;
+}
+
+function normalizeNeighborhoodName(raw: string | null): string | null {
+  if (!raw) return null;
+  const cleaned = raw
+    .replace(/^(barrio|vereda|urbanización|urbanizacion|sector|asentamiento|corregimiento)\s+/i, '')
+    .replace(/^(perímetro\s+urbano|perimetro\s+urbano|urbano\s+)/i, '')
+    .replace(/^\s*[-,\s]+|[-,\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned || null;
+}
+
+function pickNeighborhoodFromDisplayName(displayName: string | null): string | null {
+  const parts = (displayName ?? '').split(',').map(part => part.trim()).filter(Boolean);
+  const generic = /^(colombia|departamento|municipio|localidad|ciudad|comuna|upz|rap|caldas|antioquia|bogotá|bogota|manizales|medellín|medellin|cundinamarca|perímetro urbano|perimetro urbano|zona)$/i;
+
+  for (const part of parts) {
+    const cleaned = normalizeNeighborhoodName(part);
+    if (!cleaned || generic.test(cleaned)) continue;
+    if (/^(calle|carrera|avenida|av|kra|cra|cll|tv|transversal|diagonal|#)/i.test(cleaned)) continue;
+    if (/\d/.test(cleaned)) continue;
+    return cleaned;
+  }
+
+  return null;
+}
+
+function formatExactPlateAddress(raw: string, city: string | null, displayName?: string | null): string {
+  const safeNeighborhood = pickNeighborhoodFromDisplayName(displayName ?? null);
+  const normalized = normalizeAddress(raw);
+  const preserveHyphen =
+    /#\s*\d+[a-zA-Z]?\s*[-–]\s*\d+/i.test(raw) ||
+    /#\s*\d+\s+\d+/i.test(raw) ||
+    /\b\d+\s+\d+\s+\d+\b/.test(raw) ||
+    /\b\d+\s+\d+\s*-\s*\d+\b/.test(raw);
+  const formatted = normalized
+    .replace(/\s*#\s*/g, ' #')
+    .replace(/#\s*(\d+)([a-zA-Z]?)(?:[-–])?(\d+)/gi, (_, first: string, letter: string, last: string) => {
+      const suffix = (letter || '').toLowerCase();
+      return preserveHyphen ? `#${first}${suffix}-${last}` : `#${first}${suffix}${last}`;
+    })
+    .replace(/(\d+)([a-zA-Z])(?=\s|$|#)/g, (_, num: string, letter: string) => `${num}${letter.toLowerCase()}`)
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const exact = safeNeighborhood ? `${formatted}, ${safeNeighborhood}` : formatted;
+  return exact.replace(/\s+,/g, ',').trim();
+}
+
+function formatAddressWithNeighborhood(displayName: string, fallback?: string): string {
+  const parts = (displayName ?? '')
+    .split(',')
+    .map(part => part.trim())
+    .filter(Boolean);
+
+  if (parts.length === 0) return fallback ?? '';
+
+  const neighborhood = pickNeighborhoodFromDisplayName(displayName) || parts.find((part) => /^(barrio|vereda|urbanización|urbanizacion|sector|asentamiento|corregimiento)\b/i.test(part));
+  const meaningful = parts.filter((part) => !/^(comuna|localidad|municipio|distrito|departamento|upz|rap|colombia|perímetro urbano|perimetro urbano|ciudad|bogotá|bogota|medellín|medellin)$/i.test(part));
+
+  const base = meaningful.slice(0, 4).join(', ').trim();
+  if (neighborhood && !base.toLowerCase().includes(neighborhood.toLowerCase())) {
+    return `${base}, ${normalizeNeighborhoodName(neighborhood) || neighborhood}`.trim();
+  }
+
+  return base || fallback || parts.slice(0, 4).join(', ');
+}
+
 function toResult(r: any): SearchResult {
+  const displayName = (r.display_name as string) ?? '';
   return {
     lat: parseFloat(r.lat),
     lng: parseFloat(r.lon),
-    address: (r.display_name as string).split(',').slice(0, 4).join(',').trim(),
+    address: formatAddressWithNeighborhood(displayName, displayName.split(',').slice(0, 4).join(',').trim()),
   };
 }
 
@@ -103,72 +264,105 @@ async function searchAddress(
   query: string,
   near: { lat: number; lng: number } | null,
   city: string | null,
+  signal?: AbortSignal,
 ): Promise<SearchResult[]> {
+  if (signal?.aborted) return [];
+
   const normalized = normalizeAddress(query);
+  const cacheKey = `${normalized}|${near ? `${near.lat.toFixed(4)}:${near.lng.toFixed(4)}` : 'global'}|${city ?? ''}`;
+  const cached = geocodeCache.get(cacheKey);
+  if (cached) return cached;
+
+  if (normalized.length < 3) {
+    geocodeCache.set(cacheKey, []);
+    return [];
+  }
+
   const parsed = parseColombianAddress(normalized);
   const useCity = !queryMentionsCity(normalized, city) ? city : null;
   const fullQuery = useCity ? `${normalized}, ${useCity}` : normalized;
+  const exactDisplay = parsed ? formatExactPlateAddress(normalized, useCity || city || null, null) : null;
 
-  // 1) Direct search (may hit an exact house number if mapped)
   let viewbox = '';
   if (near) {
-    const d = 0.55; // bias (not restrict) toward ~60 km around the user
+    // Keep autocomplete candidates close to the detected city instead of
+    // allowing a similarly named street elsewhere in the country.
+    const d = 0.15;
     viewbox = `&viewbox=${near.lng - d},${near.lat + d},${near.lng + d},${near.lat - d}`;
   }
-  let direct = await nominatimSearch(`q=${encodeURIComponent(fullQuery)}${viewbox}`);
-  // POI names (e.g. "parque lleras") often fail with an appended city — retry without it,
-  // first restricted to the user's area, then country-wide
+
+  let direct = await nominatimSearch(`q=${encodeURIComponent(fullQuery)}${viewbox}`, 5, signal);
+  if (signal?.aborted) return [];
+
   if (direct.length === 0 && viewbox) {
-    direct = await nominatimSearch(`q=${encodeURIComponent(normalized)}${viewbox}&bounded=1`);
-  }
-  if (direct.length === 0 && useCity) {
-    direct = await nominatimSearch(`q=${encodeURIComponent(normalized)}${viewbox}`);
+    direct = await nominatimSearch(`q=${encodeURIComponent(normalized)}${viewbox}&bounded=1`, 5, signal);
+    if (signal?.aborted) return [];
   }
 
-  // Exact building/house matches win
-  const exact = direct.filter((r: any) => r.type === 'house' || r.class === 'building' || r.addresstype === 'house');
-  if (exact.length > 0) {
-    const results = exact.map(toResult);
+  if (direct.length === 0 && useCity) {
+    direct = await nominatimSearch(`q=${encodeURIComponent(normalized)}${viewbox}`, 5, signal);
+    if (signal?.aborted) return [];
+  }
+
+  // Nominatim may reject a narrow viewbox for Colombian plate formats. Retry
+  // globally before reporting no matches.
+  if (direct.length === 0 && viewbox) {
+    direct = await nominatimSearch(
+      `q=${encodeURIComponent(fullQuery)}`,
+      8,
+      signal,
+    );
+    if (signal?.aborted) return [];
+  }
+
+  if (direct.length > 0) {
+    const exact = direct.filter((r: any) =>
+      r.type === 'house' ||
+      r.class === 'building' ||
+      r.addresstype === 'house' ||
+      Boolean(r.address?.house_number && r.address?.road),
+    );
+    const isExactPlateQuery = /#\s*\d+[a-zA-Z]?(?:\s*-\s*\d+)?/i.test(normalized);
+    const results = (isExactPlateQuery && exact.length > 0 ? exact : direct).map(toResult);
     if (near) results.sort((a, b) => haversine(near.lat, near.lng, a.lat, a.lng) - haversine(near.lat, near.lng, b.lat, b.lng));
+    if (parsed && isExactPlateQuery && exactDisplay) {
+      // Never replace a house/building result with a street intersection.
+      // The intersection can be hundreds of metres away from the actual
+      // address and was the source of incorrect barrio/pin combinations.
+      results.forEach((result) => {
+        result.address = formatExactPlateAddress(normalized, useCity || city || null, result.address);
+      });
+    }
+    geocodeCache.set(cacheKey, results);
     return results;
   }
 
-  // 2) Colombian plate: approximate the intersection of the two streets.
-  // City scope: prefer the city the user typed (after a comma), else the GPS city.
-  if (parsed) {
+  const isStreetLikeQuery = /\b(calle|carrera|av|avda|avenida|transversal|diagonal|kr|cra|cll|tv)\b|\d/.test(normalized.toLowerCase());
+  const isExactPlateQuery = /#\s*\d+[a-zA-Z]?(?:\s*-\s*\d+)?/i.test(normalized);
+  if (parsed && isStreetLikeQuery && normalized.length >= 6) {
     const typedCity = /,/.test(query) ? query.split(',').pop()!.trim() : null;
     const cityParam = typedCity || city || '';
-    const cityQ = cityParam ? `&city=${encodeURIComponent(cityParam)}` : '';
-    if (cityQ) {
-      const [mainSegs, crossSegs] = await Promise.all([
-        nominatimSearch(`street=${encodeURIComponent(parsed.main)}${cityQ}`, 20),
-        nominatimSearch(`street=${encodeURIComponent(parsed.cross)}${cityQ}`, 20),
-      ]);
-      let best: { d: number; a: any; b: any } | null = null;
-      for (const a of mainSegs) {
-        for (const b of crossSegs) {
-          const d = haversine(parseFloat(a.lat), parseFloat(a.lon), parseFloat(b.lat), parseFloat(b.lon));
-          if (!best || d < best.d) best = { d, a, b };
+
+    if (cityParam) {
+      const streetQuery = `street=${encodeURIComponent(parsed.main)}&city=${encodeURIComponent(cityParam)}`;
+      const streetResults = await nominatimSearch(streetQuery, 6, signal);
+      if (signal?.aborted) return [];
+      if (streetResults.length > 0) {
+        const results = streetResults.map(toResult).slice(0, 4);
+        if (parsed) {
+          results.forEach((result) => {
+            const displayName = result.address || '';
+            result.address = formatAddressWithNeighborhood(displayName, normalized);
+          });
         }
-      }
-      // Only trust the pair when the segments are close enough to plausibly intersect
-      if (best && best.d < 1.5) {
-        const lat = (parseFloat(best.a.lat) + parseFloat(best.b.lat)) / 2;
-        const lng = (parseFloat(best.a.lon) + parseFloat(best.b.lon)) / 2;
-        // Barrio/city come from the main street segment's display name (skip the street part)
-        const context = (best.a.display_name as string).split(',').slice(1, 4).join(',').trim();
-        const approx: SearchResult = { lat, lng, address: `${parsed.plate} (aprox.), ${context}` };
-        // Keep street matches as alternative options below the approximation
-        const others = direct.map(toResult);
-        return [approx, ...others.slice(0, 4)];
+        geocodeCache.set(cacheKey, results);
+        return results;
       }
     }
   }
 
-  // 3) Fallback: street/place matches from the direct search
-  const results = direct.map(toResult);
-  if (near) results.sort((a, b) => haversine(near.lat, near.lng, a.lat, a.lng) - haversine(near.lat, near.lng, b.lat, b.lng));
-  return results;
+  geocodeCache.set(cacheKey, []);
+  return [];
 }
 
 // Reverse geocode: returns short address plus the detected city/municipality
@@ -180,9 +374,13 @@ async function reverseGeocodeFull(lat: number, lng: number): Promise<{ address: 
     );
     const data = await res.json();
     const a = data.address ?? {};
-    const city = a.city ?? a.town ?? a.municipality ?? a.village ?? null;
+    const displayName = (data.display_name as string) ?? '';
+    const city = normalizeCityName(
+      a.city ?? a.town ?? a.municipality ?? a.village ?? null,
+    );
+
     if (data.display_name) {
-      const parts = (data.display_name as string).split(',');
+      const parts = displayName.split(',');
       return { address: parts.slice(0, 3).join(',').trim(), city };
     }
   } catch { /* ignore */ }
@@ -196,6 +394,79 @@ function haversine(lat1: number, lng1: number, lat2: number, lng2: number): numb
   const a = Math.sin(dLat / 2) ** 2 +
     Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function buildNearbyTaxis(center: { lat: number; lng: number } | null, count = 5) {
+  if (!center) return [];
+  const factories = [
+    { lat: 0.0032, lng: -0.0041 }, { lat: -0.0038, lng: 0.0045 }, { lat: 0.0054, lng: 0.0032 },
+    { lat: -0.0061, lng: -0.0039 }, { lat: 0.0016, lng: 0.0055 }, { lat: -0.0053, lng: 0.0026 },
+  ];
+  return Array.from({ length: count }, (_, index) => {
+    const offset = factories[index % factories.length];
+    const jitterLat = offset.lat + ((index % 2 === 0 ? 1 : -1) * (index + 1) * 0.0008);
+    const jitterLng = offset.lng + ((index % 3 === 0 ? 1 : -1) * (index + 2) * 0.0006);
+    return {
+      id: `taxi-${index}`,
+      lat: center.lat + jitterLat,
+      lng: center.lng + jitterLng,
+      angle: (index * 32) % 360,
+    };
+  });
+}
+
+function numberToWords(value: number): string {
+  const ones = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
+  const teens = ['diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciséis', 'diecisiete', 'dieciocho', 'diecinueve'];
+  const tens = ['', '', 'veinte', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+
+  if (value < 10) return ones[value];
+  if (value < 20) return teens[value - 10];
+  if (value < 100) {
+    const ten = Math.floor(value / 10);
+    const rest = value % 10;
+    const head = tens[ten];
+    return rest === 0 ? head : `${head} y ${ones[rest]}`;
+  }
+  if (value < 1000) {
+    const hundreds = Math.floor(value / 100);
+    const rest = value % 100;
+    const prefix = hundreds === 1 ? 'cien' : `${ones[hundreds]}cientos`;
+    return rest === 0 ? prefix : `${prefix} ${numberToWords(rest)}`;
+  }
+  return String(value);
+}
+
+function toSpeechAddress(address: string): string {
+  const raw = (address || 'Ubicación de origen').replace(/\s+/g, ' ').trim();
+  if (!raw || raw.toLowerCase() === 'ubicación de origen') return 'ubicación cercana';
+
+  let text = raw
+    .replace(/\b(cra|carrea|carrera)\b/gi, 'carrera')
+    .replace(/\b(av|avenida)\b/gi, 'avenida')
+    .replace(/\b(cll|calle)\b/gi, 'calle')
+    .replace(/\b(tv|transversal)\b/gi, 'transversal')
+    .replace(/\b(dg|diagonal)\b/gi, 'diagonal')
+    .replace(/\s*#\s*/gi, ' número ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  text = text.replace(/(\d+)([a-zA-Z])(?=\s|$|,)/g, (_, num: string, letter: string) => {
+    const parsed = Number(num);
+    return `${numberToWords(parsed)} ${letter.toUpperCase()}`;
+  });
+
+  text = text.replace(/número\s+(\d+)([a-zA-Z])\s*(\d+)/gi, (_, n1: string, letter: string, n2: string) => {
+    const first = numberToWords(Number(n1));
+    const second = numberToWords(Number(n2));
+    return `número ${first} ${letter.toUpperCase()} ${second}`;
+  });
+
+  text = text.replace(/número\s+(\d+)/gi, (_, num: string) => `número ${numberToWords(Number(num))}`);
+  text = text.replace(/\b(\d+)\b/g, (_, num: string) => numberToWords(Number(num)));
+  text = text.replace(/\s*,\s*/g, ', ');
+
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 // ─── Passenger Home ───────────────────────────────────────────────────────
@@ -212,18 +483,24 @@ function PassengerHome() {
   const [origin, setOrigin] = useState<Pin | null>(null);
   const [dest, setDest] = useState<Pin | null>(null);
   const [estimatedPrice, setEstimatedPrice] = useState(0);
+  const [passengerOffer, setPassengerOffer] = useState('');
   const [distanceKm, setDistanceKm] = useState(0);
   const [activeTripId, setActiveTripId] = useState<number | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentKey>('cash');
+  const [transferMethod, setTransferMethod] = useState<TransferKey>('nequi');
+
+  const effectivePaymentMethod = paymentMethod === 'transfer' ? transferMethod : paymentMethod;
 
   // Address search state
   const [userLoc, setUserLoc] = useState<{ lat: number; lng: number } | null>(null);
   const [userCity, setUserCity] = useState<string | null>(null);
+  const [nearbyTaxis, setNearbyTaxis] = useState<Array<{ id: string; lat: number; lng: number; angle: number }>>([]);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [pending, setPending] = useState<Pin | null>(null); // candidate awaiting confirmation
   const searchReqId = useRef(0);
+  const searchControllerRef = useRef<AbortController | null>(null);
   const selectSessionId = useRef(0);
 
   const createTrip = useCreateTrip();
@@ -260,22 +537,36 @@ function PassengerHome() {
     })();
   }, []);
 
+  useEffect(() => {
+    const focusPoint = pending ?? origin ?? (userLoc ? { lat: userLoc.lat, lng: userLoc.lng, address: 'Mi ubicación' } : null);
+    const center = focusPoint ? { lat: focusPoint.lat, lng: focusPoint.lng } : null;
+    setNearbyTaxis(buildNearbyTaxis(center, focusPoint ? 5 : 3));
+  }, [pending, origin, userLoc, step]);
+
   // Debounced address search while typing (guarded against stale responses)
   useEffect(() => {
     if (step !== 'selectOrigin' && step !== 'selectDest') return;
     if (pending) return; // a candidate was chosen; don't re-search until the user edits the text
-    if (query.trim().length < 3) { setResults([]); setIsSearching(false); return; }
+    const trimmed = query.trim();
+    if (trimmed.length < 2) { setResults([]); setIsSearching(false); return; }
+
     const reqId = ++searchReqId.current;
+    const controller = new AbortController();
+    if (searchControllerRef.current) searchControllerRef.current.abort();
+    searchControllerRef.current = controller;
     if (geocodeTimer.current) clearTimeout(geocodeTimer.current);
+
     geocodeTimer.current = setTimeout(async () => {
       setIsSearching(true);
-      const found = await searchAddress(query.trim(), userLoc, userCity);
-      if (reqId !== searchReqId.current) return; // a newer search/step superseded this one
+      const found = await searchAddress(trimmed, userLoc, userCity, controller.signal);
+      if (controller.signal.aborted || reqId !== searchReqId.current) return;
       setResults(found);
       setIsSearching(false);
-    }, 700);
+    }, 100);
+
     return () => {
-      searchReqId.current++; // invalidate in-flight response
+      searchReqId.current++;
+      if (searchControllerRef.current) searchControllerRef.current.abort();
       if (geocodeTimer.current) clearTimeout(geocodeTimer.current);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -286,7 +577,7 @@ function PassengerHome() {
     setPending({ lat: r.lat, lng: r.lng, address: r.address });
     setResults([]);
     setQuery(r.address);
-    const reg: Region = { latitude: r.lat, longitude: r.lng, latitudeDelta: 0.008, longitudeDelta: 0.008 };
+    const reg: Region = { latitude: r.lat, longitude: r.lng, latitudeDelta: 0.0025, longitudeDelta: 0.0025 };
     setRegion(reg);
     mapRef.current?.animateToRegion(reg, 500);
   };
@@ -300,7 +591,8 @@ function PassengerHome() {
     if (!origin || !dest) return;
     const km = haversine(origin.lat, origin.lng, dest.lat, dest.lng);
     setDistanceKm(km);
-    setEstimatedPrice(Math.round(4500 + km * 1800));
+    setEstimatedPrice(Math.max(5500, Math.round((4500 + km * 1800) * 0.8 / 1000) * 1000));
+    setPassengerOffer('');
   }, [origin, dest]);
 
   // Listen for trip events while searching
@@ -340,7 +632,15 @@ function PassengerHome() {
 
   const confirmOrigin = () => {
     if (!pending) return;
+    const originRegion: Region = {
+      latitude: pending.lat,
+      longitude: pending.lng,
+      latitudeDelta: 0.0025,
+      longitudeDelta: 0.0025,
+    };
     setOrigin(pending);
+    setRegion(originRegion);
+    mapRef.current?.animateToRegion(originRegion, 500);
     setPending(null);
     setQuery('');
     setResults([]);
@@ -357,8 +657,14 @@ function PassengerHome() {
   };
 
   const skipDestination = () => {
-    // User chose to omit destination: proceed to confirm step without a dest.
-    setDest(null);
+    if (!origin) return;
+    // Preserve a valid destination object so the UI can detect that the destination is intentionally omitted
+    // and drivers see "Destino sin especificar" instead of a null/invalid destination.
+    setDest({
+      lat: origin.lat,
+      lng: origin.lng,
+      address: origin.address?.trim() || 'Ubicación de origen',
+    });
     setPending(null);
     setQuery('');
     setResults([]);
@@ -368,26 +674,91 @@ function PassengerHome() {
   const requestTaxi = async () => {
     if (!origin) return;
     setStep('searching');
-    try {
-      // If destination is omitted, use origin coords as a placeholder and mark address as "Destino por confirmar"
-      // If destination was omitted, send nulls for destination coordinates/address
-      const finalDestinationLat = dest?.lat ?? null;
-      const finalDestinationLng = dest?.lng ?? null;
-      const finalDestinationAddress = dest?.address ?? null;
 
-      const trip = await createTrip.mutateAsync({
-        data: {
-          originLat: origin.lat, originLng: origin.lng, originAddress: origin.address,
-          destinationLat: finalDestinationLat, destinationLng: finalDestinationLng, destinationAddress: finalDestinationAddress,
-          destinationPending: dest ? false : true,
-          vehicleType: 'taxi', paymentMethod,
-        } as any,
-      });
+    const tripPayload: Record<string, any> = {
+      originLat: origin.lat,
+      originLng: origin.lng,
+      originAddress: origin.address?.trim() || 'Ubicación de origen',
+      vehicleType: 'taxi',
+      paymentMethod: effectivePaymentMethod,
+    };
+
+    try {
+      const normalizedOriginAddress = origin.address?.trim() || 'Ubicación de origen';
+      const normalizedDestinationAddress = typeof dest?.address === 'string' ? dest.address.trim() : '';
+      const sameAsOrigin = !!dest && Number.isFinite(dest.lat) && Number.isFinite(dest.lng)
+        && Number(dest.lat) === Number(origin.lat)
+        && Number(dest.lng) === Number(origin.lng);
+      const hasDestination = !!dest && Number.isFinite(dest.lat) && Number.isFinite(dest.lng)
+        && normalizedDestinationAddress.length > 0
+        && !sameAsOrigin;
+      const fallbackDestinationAddress = normalizedDestinationAddress || normalizedOriginAddress || 'Ubicación de origen';
+
+      tripPayload.originAddress = normalizedOriginAddress;
+
+      if (hasDestination) {
+        tripPayload.destinationLat = Number(dest!.lat);
+        tripPayload.destinationLng = Number(dest!.lng);
+        tripPayload.destinationAddress = normalizedDestinationAddress;
+        tripPayload.passengerOffer = passengerOffer.trim() ? Number(passengerOffer) : undefined;
+        tripPayload.destinationPending = false;
+      } else {
+        // When the destination is intentionally omitted or equal to the origin,
+        // we keep the same origin values in destination to avoid nulls and let the UI show "Destino sin especificar".
+        tripPayload.destinationLat = Number(origin.lat);
+        tripPayload.destinationLng = Number(origin.lng);
+        tripPayload.destinationAddress = fallbackDestinationAddress;
+        tripPayload.destinationPending = true;
+      }
+
+      for (const k of Object.keys(tripPayload)) {
+        const v = (tripPayload as any)[k];
+        if (v === null || v === undefined) {
+          delete (tripPayload as any)[k];
+          continue;
+        }
+        if (k.toLowerCase().endsWith('lat') || k.toLowerCase().endsWith('lng') || k.toLowerCase().includes('price') || k === 'estimatedPrice') {
+          (tripPayload as any)[k] = Number(v) || 0;
+        }
+      }
+
+      try {
+        console.log('createTrip payload:', JSON.stringify(tripPayload));
+      } catch (e) { console.log('createTrip payload (unserializable)', e); }
+      console.log('API base URL:', getApiUrl());
+
+      const trip = await createTrip.mutateAsync({ data: tripPayload as any });
       setActiveTripId(trip.id);
       joinTrip(trip.id);
     } catch (err: any) {
+      console.error('createTrip error:', err);
+
+      const msg = err?.data?.error ?? err?.message ?? (typeof err === 'string' ? err : null);
+      if (msg && typeof msg === 'string' && msg.toLowerCase().includes('network request failed')) {
+        try {
+          const base = getApiUrl();
+          console.log('Retrying createTrip with direct fetch to', `${base}/trips`);
+          const token = await AsyncStorage.getItem('auth_token');
+          const res = await fetch(`${base}/trips`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '', },
+            body: JSON.stringify(tripPayload),
+          });
+          const text = await res.text();
+          console.log('Direct fetch response status:', res.status, 'body:', text);
+          if (!res.ok) throw new Error(`Direct fetch failed: ${res.status} ${text}`);
+          const json = JSON.parse(text || '{}');
+          setActiveTripId(json.id);
+          joinTrip(json.id);
+          return;
+        } catch (e2: any) {
+          console.error('Direct fetch createTrip error:', e2);
+        }
+      }
+
       setStep('confirm');
-      Alert.alert('Error', err?.data?.error ?? 'No se pudo solicitar el taxi.');
+      const fallbackMsg = err?.data?.error ?? err?.message ?? (typeof err === 'string' ? err : 'No se pudo solicitar el taxi.');
+      Alert.alert('Error', fallbackMsg);
     }
   };
 
@@ -395,10 +766,10 @@ function PassengerHome() {
     if (activeTripId) {
       try {
         const token = await AsyncStorage.getItem('auth_token');
-        const base = (process.env.EXPO_PUBLIC_API_BASE_URL ?? `https://${process.env.EXPO_PUBLIC_DOMAIN}`).replace(/\/api\/?$/i, '').replace(/\/$/, '') + '/api';
+        const base = getApiUrl();
         await fetch(`${base}/trips/${activeTripId}/status`, {
           method: 'PATCH',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          headers: { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '', },
           body: JSON.stringify({ status: 'cancelled' }),
         });
         leaveTrip(activeTripId);
@@ -427,7 +798,7 @@ function PassengerHome() {
       <MapView
         ref={mapRef}
         style={StyleSheet.absoluteFill}
-        provider={PROVIDER_DEFAULT}
+        mapType="standard"
         region={region}
         onRegionChangeComplete={handleRegionChange}
         showsUserLocation
@@ -437,6 +808,21 @@ function PassengerHome() {
         pitchEnabled={false}
         rotateEnabled={false}
       >
+        <UrlTile
+          urlTemplate={MAP_TILE_URL}
+          maximumZ={19}
+          tileSize={256}
+          zIndex={1}
+        />
+        {nearbyTaxis.length > 0 && (
+          nearbyTaxis.map((taxi) => (
+            <Marker key={taxi.id} coordinate={{ latitude: taxi.lat, longitude: taxi.lng }} title="Taxi cercano">
+              <View style={{ transform: [{ rotate: `${taxi.angle}deg` }] }}>
+                <Text style={{ fontSize: 18 }}>🚕</Text>
+              </View>
+            </Marker>
+          ))
+        )}
         {origin && step !== 'selectOrigin' && (
           <Marker coordinate={{ latitude: origin.lat, longitude: origin.lng }} title="Origen">
             <View style={[styles.markerDot, { backgroundColor: colors.light.primary }]} />
@@ -504,7 +890,7 @@ function PassengerHome() {
       {/* Bottom sheet — idle */}
       {step === 'idle' && (
         <View style={[styles.sheet, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
-          <Text style={styles.sheetTitle}>Hola, {user?.name?.split(' ')[0]} 👋</Text>
+          <Text style={styles.sheetTitle}>Hola, {user?.name?.split(' ')[0]}</Text>
 
           <View style={styles.summaryCard}>
             <View style={styles.summaryHeader}>
@@ -542,10 +928,11 @@ function PassengerHome() {
 
       {/* Bottom sheet — address search (origin / destination) */}
       {isSelectingMode && (
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        <KeyboardAwareScrollViewCompat
+          maxExtraScroll={220}
           keyboardVerticalOffset={insets.top + (Platform.OS === 'web' ? 67 : 60)}
           style={styles.sheetKeyboardWrap}
+          contentContainerStyle={[{ flexGrow: 1 }]} 
           pointerEvents="box-none"
         >
         <View style={[styles.sheet, styles.sheetStatic, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
@@ -598,8 +985,9 @@ function PassengerHome() {
           {/* Confirmation */}
           {pending && (
             <View style={styles.pendingBox}>
-              <Text style={styles.pendingLabel}>¿Es correcta esta ubicación?</Text>
+              <Text style={styles.pendingLabel}>Verifica el pin en el mapa</Text>
               <Text style={styles.pendingAddress} numberOfLines={2}>{pending.address}</Text>
+              <Text style={styles.pendingHint}>Si el punto no coincide exactamente, busca otra opción antes de continuar.</Text>
             </View>
           )}
           <TouchableOpacity
@@ -635,7 +1023,7 @@ function PassengerHome() {
             </TouchableOpacity>
           )}
         </View>
-        </KeyboardAvoidingView>
+        </KeyboardAwareScrollViewCompat>
       )}
 
       {/* Bottom sheet — confirm */}
@@ -653,14 +1041,27 @@ function PassengerHome() {
             </View>
           </View>
 
-          <View style={styles.priceRow}>
+          {dest.lat !== origin.lat || dest.lng !== origin.lng ? <View style={styles.priceRow}>
             <View>
               <Text style={styles.priceLabel}>Precio estimado</Text>
-              <Text style={styles.priceNote}>⚠️ Este es un precio estimado, puede variar</Text>
+              <Text style={styles.priceNote}>Tarifa sugerida económica · puede variar</Text>
             </View>
             <Text style={styles.priceValue}>${estimatedPrice.toLocaleString('es-CO')}</Text>
-          </View>
-          <Text style={styles.distanceNote}>{distanceKm.toFixed(1)} km · Taxi</Text>
+          </View> : <Text style={styles.priceNote}>Sin destino: la tarifa se definirá cuando indiques el destino.</Text>}
+          {dest.lat !== origin.lat || dest.lng !== origin.lng ? <>
+            <Text style={styles.distanceNote}>{distanceKm.toFixed(1)} km · Taxi</Text>
+            <Text style={styles.offerHint}>
+              Acepta la tarifa sugerida o aumenta tu oferta en múltiplos de $500. No puedes ofrecer menos.
+            </Text>
+            <TextInput
+              style={styles.offerInput}
+              keyboardType="numeric"
+              value={passengerOffer}
+              onChangeText={(text) => setPassengerOffer(text.replace(/[^\d]/g, ''))}
+              placeholder={`Oferta opcional · mínimo $${estimatedPrice.toLocaleString('es-CO')}`}
+              placeholderTextColor={colors.light.mutedForeground}
+            />
+          </> : null}
 
           {/* Payment method selector */}
           <View style={styles.paySection}>
@@ -670,16 +1071,36 @@ function PassengerHome() {
                 <TouchableOpacity
                   key={opt.key}
                   style={[styles.payChip, paymentMethod === opt.key && styles.payChipActive]}
-                  onPress={() => setPaymentMethod(opt.key)}
+                  onPress={() => {
+                    setPaymentMethod(opt.key as PaymentKey);
+                    if (opt.key === 'transfer') setTransferMethod('nequi');
+                  }}
                   activeOpacity={0.75}
                 >
-                  <Text style={styles.payChipIcon}>{opt.icon}</Text>
+                  <View style={styles.payChipIcon}><PaymentIcon type={opt.key === 'transfer' ? 'transfer' : 'cash'} /></View>
                   <Text style={[styles.payChipText, paymentMethod === opt.key && styles.payChipTextActive]}>
                     {opt.label}
                   </Text>
                 </TouchableOpacity>
               ))}
             </View>
+            {paymentMethod === 'transfer' && (
+              <View style={[styles.payRow, { marginTop: 8 }]}>
+                {TRANSFER_OPTIONS.map(opt => (
+                  <TouchableOpacity
+                    key={opt.key}
+                    style={[styles.payChip, transferMethod === opt.key && styles.payChipActive]}
+                    onPress={() => setTransferMethod(opt.key as TransferKey)}
+                    activeOpacity={0.75}
+                  >
+                    <View style={styles.payChipIcon}><PaymentIcon type={opt.key as 'nequi' | 'daviplata' | 'breve'} /></View>
+                    <Text style={[styles.payChipText, transferMethod === opt.key && styles.payChipTextActive]}>
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
           </View>
 
           <TouchableOpacity style={styles.primaryBtn} onPress={requestTaxi} disabled={createTrip.isPending} activeOpacity={0.85}>
@@ -688,7 +1109,100 @@ function PassengerHome() {
               : <><Feather name="navigation" size={18} color={colors.light.primaryForeground} /><Text style={styles.primaryBtnText}>Solicitar taxi</Text></>
             }
           </TouchableOpacity>
-          <TouchableOpacity style={styles.secondaryBtn} onPress={resetSelection}>
+          <TouchableOpacity
+            style={styles.secondaryBtn}
+            onPress={() => {
+              // go back to destination selection so user can change destination
+              setStep('selectDest');
+              setPending(dest);
+              setQuery(dest?.address ?? '');
+            }}
+          >
+            <Text style={styles.secondaryBtnText}>Cambiar ruta</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Bottom sheet — confirm (origin set, destination omitted) */}
+      {step === 'confirm' && origin && !dest && (
+        <View style={[styles.sheet, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
+          <View style={styles.routeSummary}>
+            <View style={styles.routeRow}>
+              <Feather name="circle" size={10} color={colors.light.primary} />
+              <Text style={styles.routeText} numberOfLines={2}>{origin.address}</Text>
+            </View>
+            <View style={[styles.routeConnector]} />
+            <View style={styles.routeRow}>
+              <Feather name="map-pin" size={10} color={colors.light.destructive} />
+              <Text style={styles.routeText} numberOfLines={1}>Destino por confirmar</Text>
+            </View>
+          </View>
+
+          <View style={styles.noDestinationCard}>
+            <Feather name="info" size={17} color={colors.light.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.noDestinationTitle}>Viaje sin destino</Text>
+              <Text style={styles.noDestinationText}>
+                El conductor acordará contigo la tarifa cuando le indiques a dónde vas.
+              </Text>
+            </View>
+          </View>
+
+          {/* Payment method selector (still allow choosing) */}
+          <View style={styles.paySection}>
+            <Text style={styles.payLabel}>¿Cómo vas a pagar?</Text>
+            <View style={styles.payRow}>
+              {PAYMENT_OPTIONS.map(opt => (
+                <TouchableOpacity
+                  key={opt.key}
+                  style={[styles.payChip, paymentMethod === opt.key && styles.payChipActive]}
+                  onPress={() => {
+                    setPaymentMethod(opt.key as PaymentKey);
+                    if (opt.key === 'transfer') setTransferMethod('nequi');
+                  }}
+                  activeOpacity={0.75}
+                >
+                  <View style={styles.payChipIcon}><PaymentIcon type={opt.key === 'transfer' ? 'transfer' : 'cash'} /></View>
+                  <Text style={[styles.payChipText, paymentMethod === opt.key && styles.payChipTextActive]}>
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            {paymentMethod === 'transfer' && (
+              <View style={[styles.payRow, { marginTop: 8 }]}>
+                {TRANSFER_OPTIONS.map(opt => (
+                  <TouchableOpacity
+                    key={opt.key}
+                    style={[styles.payChip, transferMethod === opt.key && styles.payChipActive]}
+                    onPress={() => setTransferMethod(opt.key as TransferKey)}
+                    activeOpacity={0.75}
+                  >
+                    <View style={styles.payChipIcon}><PaymentIcon type={opt.key as 'nequi' | 'daviplata' | 'breve'} /></View>
+                    <Text style={[styles.payChipText, transferMethod === opt.key && styles.payChipTextActive]}>
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </View>
+
+          <TouchableOpacity style={styles.primaryBtn} onPress={requestTaxi} disabled={createTrip.isPending} activeOpacity={0.85}>
+            {createTrip.isPending
+              ? <ActivityIndicator color={colors.light.primaryForeground} />
+              : <><Feather name="navigation" size={18} color={colors.light.primaryForeground} /><Text style={styles.primaryBtnText}>Solicitar taxi sin destino</Text></>
+            }
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.secondaryBtn}
+            onPress={() => {
+              // go back to destination selection when destination was omitted
+              setStep('selectDest');
+              setPending(null);
+              setQuery('');
+            }}
+          >
             <Text style={styles.secondaryBtnText}>Cambiar ruta</Text>
           </TouchableOpacity>
         </View>
@@ -703,15 +1217,56 @@ function DriverHome() {
   const { user, updateUser } = useAuth();
   const { socket } = useSocket();
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [locationError, setLocationError] = useState(false);
+  const [locationLoading, setLocationLoading] = useState(true);
   // Always start offline — drivers must manually connect each session
   const [isOnline, setIsOnline] = useState(false);
   const [requests, setRequests] = useState<any[]>([]);
   const [acceptingId, setAcceptingId] = useState<number | null>(null);
   const [panicPending, setPanicPending] = useState(false);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setRequests(prev => prev.filter(req => {
+        const deadline = Number(req.expiresAt ?? Date.now());
+        return deadline > Date.now() + 250;
+      }));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
   const panicAnim = useRef(new Animated.Value(1)).current;
   const updateStatus = useUpdateDriverStatus();
   const updateLocation = useUpdateDriverLocation();
   const acceptTrip = useUpdateTripStatus();
+
+  const announceTripRequest = useCallback((trip: any) => {
+    try {
+      const originAddress = (trip?.originAddress || 'Ubicación de origen')
+        .replace(/\s+/g, ' ')
+        .replace(/,\s*$/, '')
+        .trim();
+      const originLabel = toSpeechAddress(originAddress);
+
+      const paymentMethodLabel = (() => {
+        const method = (trip?.paymentMethod || 'cash').toString().toLowerCase();
+        if (method === 'cash') return 'Efectivo';
+        if (method === 'nequi') return 'Nequi';
+        if (method === 'daviplata') return 'Daviplata';
+        if (method === 'breve') return 'Breve';
+        return method || 'Efectivo';
+      })();
+
+      const message = `Solicitan taxi desde la dirección ${originLabel}. Pago: ${paymentMethodLabel}`;
+      Speech.stop();
+      Speech.speak(message, {
+        language: 'es-ES',
+        rate: 1.15,
+        pitch: 1.0,
+      });
+    } catch {
+      // Ignore TTS failures in unsupported environments.
+    }
+  }, []);
 
   // On mount, force the server state to offline so previous sessions don't linger
   useEffect(() => {
@@ -723,18 +1278,29 @@ function DriverHome() {
   useEffect(() => {
     let sub: Location.LocationSubscription | null = null;
     (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
-      const pos = await Location.getCurrentPositionAsync({});
-      setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-      if (isOnline) {
-        sub = await Location.watchPositionAsync(
-          { accuracy: Location.Accuracy.Balanced, timeInterval: 8_000, distanceInterval: 30 },
-          async (p) => {
-            setLocation({ lat: p.coords.latitude, lng: p.coords.longitude });
-            try { await updateLocation.mutateAsync({ data: { lat: p.coords.latitude, lng: p.coords.longitude } }); } catch { }
-          },
-        );
+      try {
+        setLocationLoading(true);
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          setLocationError(true);
+          return;
+        }
+        const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+        setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setLocationError(false);
+        if (isOnline) {
+          sub = await Location.watchPositionAsync(
+            { accuracy: Location.Accuracy.High, timeInterval: 8_000, distanceInterval: 30 },
+            async (p) => {
+              setLocation({ lat: p.coords.latitude, lng: p.coords.longitude });
+              try { await updateLocation.mutateAsync({ data: { lat: p.coords.latitude, lng: p.coords.longitude } }); } catch { }
+            },
+          );
+        }
+      } catch {
+        setLocationError(true);
+      } finally {
+        setLocationLoading(false);
       }
     })();
     return () => { sub?.remove(); };
@@ -744,11 +1310,30 @@ function DriverHome() {
   useEffect(() => {
     if (!socket || !isOnline) return;
     const handler = (trip: any) => {
-      setRequests(prev => prev.find(r => r.id === trip.id) ? prev : [trip, ...prev].slice(0, 3));
+      setRequests(prev => {
+        const next = [...prev];
+        const index = next.findIndex(r => r.id === trip.id);
+        const enriched = { ...trip, expiresAt: Date.now() + 10_000 };
+        if (index >= 0) {
+          next[index] = enriched;
+        } else {
+          next.unshift(enriched);
+        }
+        return next.slice(0, 4);
+      });
+      announceTripRequest(trip);
+    };
+    const onStatusUpdated = (trip: any) => {
+      if (!trip || trip.status === 'pending') return;
+      setRequests(prev => prev.filter(r => r.id !== trip.id));
     };
     socket.on('trip:new_request', handler);
-    return () => { socket.off('trip:new_request', handler); };
-  }, [socket, isOnline]);
+    socket.on('trip_status_updated', onStatusUpdated);
+    return () => {
+      socket.off('trip:new_request', handler);
+      socket.off('trip_status_updated', onStatusUpdated);
+    };
+  }, [socket, isOnline, announceTripRequest]);
 
   // Listen for forced-offline event when subscription expires mid-session
   useEffect(() => {
@@ -818,8 +1403,55 @@ function DriverHome() {
     router.push(`/trip/${req.id}`);
   };
 
+  const handleCounterOffer = (req: any) => {
+    const minimum = Number(req.passengerOffer ?? req.minimumFare) + 500;
+    const submitCounterOffer = async (value: string) => {
+      const amount = Number(value);
+      if (!Number.isFinite(amount)) return;
+      try {
+        const token = await AsyncStorage.getItem('auth_token');
+        const response = await fetch(`${getApiUrl()}/trips/${req.id}/counteroffer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' },
+          body: JSON.stringify({ amount }),
+        });
+        if (!response.ok) throw new Error((await response.json()).error ?? 'Contraoferta inválida');
+        Alert.alert('Contraoferta enviada', 'El pasajero recibirá tu propuesta.');
+      } catch (error: any) { Alert.alert('Error', error?.message ?? 'No se pudo enviar la contraoferta.'); }
+    };
+
+    if (Platform.OS === 'ios') {
+      Alert.prompt(
+        'Contraoferta',
+        `Ingresa una tarifa mayor (mínimo $${minimum.toLocaleString('es-CO')})`,
+        submitCounterOffer,
+        'plain-text',
+      );
+      return;
+    }
+
+    Alert.alert(
+      'Contraoferta',
+      `Selecciona una tarifa mayor a $${(minimum - 500).toLocaleString('es-CO')}`,
+      [
+        { text: `$${minimum.toLocaleString('es-CO')}`, onPress: () => submitCounterOffer(String(minimum)) },
+        { text: `$${(minimum + 500).toLocaleString('es-CO')}`, onPress: () => submitCounterOffer(String(minimum + 500)) },
+        { text: `$${(minimum + 1000).toLocaleString('es-CO')}`, onPress: () => submitCounterOffer(String(minimum + 1000)) },
+        { text: 'Cancelar', style: 'cancel' },
+      ],
+    );
+  };
+
   const toggleOnline = async () => {
     const next = !isOnline;
+    if (next && (!location || locationError)) {
+      Alert.alert(
+        'Ubicación necesaria',
+        'Activa el permiso de ubicación para conectarte y recibir solicitudes cercanas.',
+        [{ text: 'Entendido' }],
+      );
+      return;
+    }
     try {
       await updateStatus.mutateAsync({ data: { isOnline: next } });
       setIsOnline(next);
@@ -857,10 +1489,10 @@ function DriverHome() {
             Vibration.vibrate([0, 200, 100, 200, 100, 400]);
             try {
               const token = await AsyncStorage.getItem('auth_token');
-              const base = (process.env.EXPO_PUBLIC_API_BASE_URL ?? `https://${process.env.EXPO_PUBLIC_DOMAIN}`).replace(/\/api\/?$/i, '').replace(/\/$/, '') + '/api';
+              const base = getApiUrl();
               const res = await fetch(`${base}/drivers/panic`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                headers: { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '', },
                 body: JSON.stringify({ message: 'Necesito ayuda urgente' }),
               });
               const json = await res.json();
@@ -895,17 +1527,24 @@ function DriverHome() {
 
       <View style={[styles.topLabel, { top: insets.top + (Platform.OS === 'web' ? 67 : 16) }]}>
         <View style={styles.driverTopRow}>
-          <View>
-            <Text style={styles.topLabelText}>{isOnline ? '🟢 En línea — recibiendo solicitudes' : '⚫ Fuera de línea'}</Text>
+          <View style={{ flex: 1 }}>
+            {isOnline ? (
+              <>
+                <Text style={styles.topLabelText}>🟢 En línea</Text>
+                <Text style={styles.topLabelSubText}>Recibiendo solicitudes</Text>
+              </>
+            ) : (
+              <Text style={styles.topLabelText}>⚫ Fuera de línea</Text>
+            )}
           </View>
           <TouchableOpacity
             style={[styles.toggleBtn, isOnline ? styles.toggleBtnOn : styles.toggleBtnOff]}
             onPress={toggleOnline}
-            disabled={updateStatus.isPending}
+            disabled={updateStatus.isPending || locationLoading}
           >
             {updateStatus.isPending
               ? <ActivityIndicator size="small" color={colors.light.primaryForeground} />
-              : <Text style={styles.toggleBtnText}>{isOnline ? 'Desconectar' : 'Conectar'}</Text>
+              : <Text style={styles.toggleBtnText}>{locationLoading ? 'Ubicando...' : isOnline ? 'Desconectar' : 'Conectar'}</Text>
             }
           </TouchableOpacity>
         </View>
@@ -918,24 +1557,40 @@ function DriverHome() {
               <View style={styles.requestTop}>
                 <Feather name="bell" size={14} color={colors.light.accent} />
                 <Text style={styles.requestTitle}>Nueva solicitud de taxi</Text>
+                <View style={styles.countdownPill}>
+                  <Feather name="clock" size={12} color={colors.light.accent} />
+                  <Text style={styles.countdownText}>{Math.max(0, Math.ceil((Number(req.expiresAt ?? Date.now()) - Date.now()) / 1000))}s</Text>
+                </View>
                 <TouchableOpacity onPress={() => setRequests(p => p.filter(r => r.id !== req.id))}>
                   <Feather name="x" size={14} color={colors.light.mutedForeground} />
                 </TouchableOpacity>
               </View>
               <View style={{ gap: 4 }}>
                 <View style={styles.reqRow}><Feather name="circle" size={9} color={colors.light.primary} /><Text style={styles.reqText} numberOfLines={1}>{req.originAddress}</Text></View>
-                <View style={styles.reqRow}><Feather name="map-pin" size={9} color={colors.light.destructive} /><Text style={styles.reqText} numberOfLines={1}>{req.destinationAddress}</Text></View>
+                {req.destinationAddress && req.destinationAddress !== req.originAddress && (
+                  <View style={styles.reqRow}><Feather name="map-pin" size={9} color={colors.light.destructive} /><Text style={styles.reqText} numberOfLines={1}>{req.destinationAddress}</Text></View>
+                )}
               </View>
               <View style={styles.requestMeta}>
-                <Text style={styles.reqPrice}>${Number(req.estimatedPrice).toLocaleString('es-CO')}</Text>
-                <Text style={styles.reqDist}>{Number(req.distanceKm).toFixed(1)} km</Text>
+                {req.estimatedPrice != null ? (
+                  <View>
+                    <Text style={styles.reqPrice}>${Number(req.passengerOffer ?? req.estimatedPrice).toLocaleString('es-CO')}</Text>
+                    <Text style={styles.reqPriceLabel}>{req.passengerOffer != null ? 'Oferta del pasajero' : 'Tarifa sugerida'}</Text>
+                  </View>
+                ) : <Text style={styles.reqPrice}>Sin tarifa</Text>}
+                {req.distanceKm != null && <Text style={styles.reqDist}>{Number(req.distanceKm).toFixed(1)} km</Text>}
                 <View style={styles.reqPayBadge}>
+                  <View style={styles.reqPayIcon}><PaymentIcon type={getPaymentInfo(req.paymentMethod).kind} /></View>
                   <Text style={styles.reqPayText}>
-                    {PAYMENT_OPTIONS.find(p => p.key === (req.paymentMethod ?? 'cash'))?.icon ?? '💵'}{' '}
-                    {PAYMENT_OPTIONS.find(p => p.key === (req.paymentMethod ?? 'cash'))?.label ?? 'Efectivo'}
+                    {getPaymentInfo(req.paymentMethod).label}
                   </Text>
                 </View>
               </View>
+              {req.passengerOffer != null && (
+                <TouchableOpacity style={styles.counterBtn} onPress={() => handleCounterOffer(req)}>
+                  <Text style={styles.counterText}>Enviar una tarifa mayor</Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity
                 style={[styles.acceptBtn, acceptingId === req.id && { opacity: 0.6 }]}
                 onPress={() => handleAccept(req)}
@@ -954,7 +1609,20 @@ function DriverHome() {
 
       {!isOnline && (
         <View style={[styles.offlineCard, { bottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
-          <Text style={styles.offlineText}>Conéctate para recibir solicitudes de taxi</Text>
+          <Feather name={locationError ? 'map-pin' : 'power'} size={16} color={locationError ? colors.light.destructive : colors.light.primary} />
+          <Text style={styles.offlineText}>
+            {locationError ? 'Activa la ubicación para poder conectarte' : 'Conéctate para recibir solicitudes de taxi'}
+          </Text>
+        </View>
+      )}
+
+      {isOnline && requests.length === 0 && (
+        <View style={[styles.onlineEmptyCard, { bottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
+          <Feather name="radio" size={16} color={colors.light.primary} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.onlineEmptyTitle}>Buscando solicitudes</Text>
+            <Text style={styles.onlineEmptyText}>Te avisaremos cuando haya un viaje cerca.</Text>
+          </View>
         </View>
       )}
 
@@ -1001,15 +1669,16 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.light.border,
     paddingHorizontal: 16, paddingVertical: 12,
   },
-  topLabelText: { fontSize: 13, fontWeight: '600', color: colors.light.foreground, fontFamily: 'Inter_600SemiBold' },
   driverTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   toggleBtn: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 16 },
   toggleBtnOn: { backgroundColor: colors.light.destructive + 'CC' },
   toggleBtnOff: { backgroundColor: colors.light.primary },
   toggleBtnText: { fontSize: 12, fontWeight: '700', color: '#fff', fontFamily: 'Inter_700Bold' },
+  topLabelSubText: { fontSize: 12, color: colors.light.mutedForeground, marginTop: 2, fontFamily: 'Inter_600SemiBold' },
+  topLabelText: { fontSize: 13, fontWeight: '600', color: colors.light.foreground, fontFamily: 'Inter_600SemiBold' },
   // Searching overlay
   searchingOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: colors.light.background + 'F0',
     alignItems: 'center', justifyContent: 'center', gap: 16,
   },
@@ -1104,6 +1773,7 @@ const styles = StyleSheet.create({
   },
   pendingLabel: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold', marginBottom: 4 },
   pendingAddress: { fontSize: 14, color: colors.light.foreground, fontFamily: 'Inter_500Medium', lineHeight: 19 },
+  pendingHint: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', lineHeight: 17, marginTop: 5 },
   btnDisabled: { opacity: 0.45 },
   addressText: { flex: 1, fontSize: 15, color: colors.light.foreground, fontFamily: 'Inter_400Regular', lineHeight: 22 },
   routeSummary: { gap: 8 },
@@ -1113,8 +1783,17 @@ const styles = StyleSheet.create({
   priceRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   priceLabel: { fontSize: 14, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
   priceNote: { fontSize: 11, color: '#FFB800', fontFamily: 'Inter_400Regular', marginTop: 2 },
+  offerInput: { borderWidth: 1, borderColor: colors.light.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9, marginTop: 8, color: colors.light.foreground, fontFamily: 'Inter_400Regular' },
   priceValue: { fontSize: 26, fontWeight: '700', color: colors.light.primary, fontFamily: 'Inter_700Bold' },
   distanceNote: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
+  offerHint: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', lineHeight: 17, marginTop: 8 },
+  noDestinationCard: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 10,
+    backgroundColor: colors.light.primary + '12', borderRadius: 12,
+    borderWidth: 1, borderColor: colors.light.primary + '45', padding: 12,
+  },
+  noDestinationTitle: { fontSize: 14, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  noDestinationText: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', lineHeight: 17, marginTop: 3 },
   primaryBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     backgroundColor: colors.light.primary, borderRadius: colors.radius, paddingVertical: 15,
@@ -1128,19 +1807,30 @@ const styles = StyleSheet.create({
     backgroundColor: colors.light.card + 'F8', borderRadius: colors.radius,
     borderWidth: 1, borderColor: colors.light.border, padding: 14, gap: 10,
   },
+  counterBtn: { alignItems: 'center', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: colors.light.primary },
+  counterText: { color: colors.light.primary, fontFamily: 'Inter_700Bold', fontSize: 13 },
   requestTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   requestTitle: { flex: 1, fontSize: 14, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  countdownPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: colors.light.secondary, borderRadius: 999,
+    borderWidth: 1, borderColor: colors.light.border,
+    paddingHorizontal: 8, paddingVertical: 4,
+  },
+  countdownText: { fontSize: 11, fontWeight: '700', color: colors.light.accent, fontFamily: 'Inter_700Bold' },
   reqRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   reqText: { flex: 1, fontSize: 13, color: colors.light.foreground, fontFamily: 'Inter_400Regular' },
   requestMeta: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   reqPrice: { fontSize: 20, fontWeight: '700', color: colors.light.primary, fontFamily: 'Inter_700Bold' },
+  reqPriceLabel: { fontSize: 11, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', marginTop: 1 },
   reqDist: { fontSize: 13, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
   reqPayBadge: {
-    flexDirection: 'row', alignItems: 'center',
+    flexDirection: 'row', alignItems: 'center', gap: 6,
     backgroundColor: colors.light.secondary, borderRadius: 12,
     paddingHorizontal: 8, paddingVertical: 3,
     borderWidth: 1, borderColor: colors.light.border,
   },
+  reqPayIcon: { width: 16, height: 16, alignItems: 'center', justifyContent: 'center' },
   reqPayText: { fontSize: 12, color: colors.light.foreground, fontFamily: 'Inter_600SemiBold' },
   // Payment method selector in confirm sheet
   paySection: { gap: 8 },
@@ -1152,7 +1842,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.light.secondary, borderWidth: 1, borderColor: colors.light.border,
   },
   payChipActive: { backgroundColor: colors.light.primary, borderColor: colors.light.primary },
-  payChipIcon: { fontSize: 14 },
+  payChipIcon: { width: 16, height: 16, alignItems: 'center', justifyContent: 'center' },
   payChipText: { fontSize: 13, fontWeight: '600', color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold' },
   payChipTextActive: { color: colors.light.primaryForeground },
   acceptBtn: { backgroundColor: colors.light.primary, borderRadius: colors.radius - 2, paddingVertical: 12, alignItems: 'center' },
@@ -1160,9 +1850,16 @@ const styles = StyleSheet.create({
   offlineCard: {
     position: 'absolute', left: 16, right: 16,
     backgroundColor: colors.light.card + 'F0', borderRadius: colors.radius,
-    borderWidth: 1, borderColor: colors.light.border, paddingVertical: 14, alignItems: 'center',
+    borderWidth: 1, borderColor: colors.light.border, paddingVertical: 14, paddingHorizontal: 14, alignItems: 'center', flexDirection: 'row', gap: 10,
   },
   offlineText: { fontSize: 14, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
+  onlineEmptyCard: {
+    position: 'absolute', left: 16, right: 16,
+    backgroundColor: colors.light.card + 'F0', borderRadius: colors.radius,
+    borderWidth: 1, borderColor: colors.light.primary + '55', padding: 14, flexDirection: 'row', alignItems: 'center', gap: 10,
+  },
+  onlineEmptyTitle: { fontSize: 14, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  onlineEmptyText: { fontSize: 12, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', marginTop: 2 },
   markerDot: { width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: '#fff' },
   // Panic button
   panicBtnWrap: {

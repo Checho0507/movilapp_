@@ -54,7 +54,12 @@ function TripCard({ item }: { item: any }) {
       <View style={styles.cardFooter}>
         <Text style={styles.metaText}>
           {item.distanceKm ? `${Number(item.distanceKm).toFixed(1)} km • ` : ''}
-          {item.vehicleType} • {item.paymentMethod === 'cash' ? 'Efectivo' : 'Tarjeta'}
+          {item.vehicleType} • {item.paymentMethod === 'cash' ? 'Efectivo' : (
+            item.paymentMethod === 'nequi' ? 'Transferencia (Nequi)' :
+            item.paymentMethod === 'daviplata' ? 'Transferencia (Daviplata)' :
+            item.paymentMethod === 'breve' ? 'Transferencia (Breve)' :
+            item.paymentMethod
+          )}
         </Text>
         {isActive && (
           <View style={styles.activeChip}>
@@ -68,7 +73,7 @@ function TripCard({ item }: { item: any }) {
 
 export default function HistoryScreen() {
   const insets = useSafeAreaInsets();
-  const { data: trips, isLoading, refetch, isRefetching } = useListTrips();
+  const { data: trips, isLoading, isError, refetch, isRefetching } = useListTrips();
 
   return (
     <View style={[styles.root, { paddingTop: insets.top + (Platform.OS === 'web' ? 67 : 0) }]}>
@@ -78,6 +83,15 @@ export default function HistoryScreen() {
       {isLoading ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.light.primary} />
+        </View>
+      ) : isError ? (
+        <View style={styles.center}>
+          <Feather name="wifi-off" size={44} color={colors.light.destructive} />
+          <Text style={styles.errorTitle}>No pudimos cargar tus viajes</Text>
+          <Text style={styles.errorText}>Revisa tu conexión e inténtalo de nuevo.</Text>
+          <TouchableOpacity style={styles.retryBtn} onPress={() => refetch()}>
+            <Text style={styles.retryText}>Reintentar</Text>
+          </TouchableOpacity>
         </View>
       ) : (
         <FlatList
@@ -128,4 +142,8 @@ const styles = StyleSheet.create({
   activeChipText: { fontSize: 12, fontWeight: '600', color: colors.light.primary, fontFamily: 'Inter_600SemiBold' },
   empty: { flex: 1, alignItems: 'center', paddingTop: 80, gap: 16 },
   emptyText: { fontSize: 16, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
+  errorTitle: { marginTop: 16, fontSize: 17, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold' },
+  errorText: { fontSize: 14, color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
+  retryBtn: { marginTop: 4, backgroundColor: colors.light.primary, borderRadius: 10, paddingHorizontal: 18, paddingVertical: 10 },
+  retryText: { color: colors.light.primaryForeground, fontSize: 14, fontFamily: 'Inter_600SemiBold' },
 });

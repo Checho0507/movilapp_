@@ -21,16 +21,15 @@ ALTER TABLE trips
 -- (Adjust these conditions if your dataset uses different placeholders)
 UPDATE trips
 SET destination_lat = NULL
-WHERE destination_lat = '0' OR destination_lat = '';
+WHERE destination_lat = 0 OR destination_lat::text = '';
 
 UPDATE trips
 SET destination_lng = NULL
-WHERE destination_lng = '0' OR destination_lng = '';
+WHERE destination_lng = 0 OR destination_lng::text = '';
 
 UPDATE trips
 SET destination_address = NULL
-WHERE destination_address = '';
-
+WHERE destination_address = '' OR destination_address IS NULL;
 -- 4) Mark destination_pending for trips missing destination info
 UPDATE trips
 SET destination_pending = true

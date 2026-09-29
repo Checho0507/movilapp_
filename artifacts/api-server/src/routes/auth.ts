@@ -10,13 +10,27 @@ const router = Router();
 const VALID_PAYMENT_METHODS = ["nequi", "daviplata", "breve"] as const;
 type DigitalPayment = typeof VALID_PAYMENT_METHODS[number];
 
-function normalizePhone(phone: string): string {
+export function normalizePhone(phone: string): string {
   // Strip all non-digit characters so we normalize formats like +57 300-123-4567, (300) 123 4567, etc.
   const digits = (phone ?? "").toString().replace(/\D+/g, "");
   return digits;
 }
 
-function formatUser(u: typeof usersTable.$inferSelect) {
+export function isValidPassword(password: string | undefined): boolean {
+  return typeof password === "string" && password.length >= 6;
+}
+
+export function sanitizeAcceptedPayments(
+  role: string,
+  acceptedPayments?: string[] | null,
+): string[] {
+  if (role !== "driver") return [];
+  return (acceptedPayments ?? []).filter((method): method is string =>
+    VALID_PAYMENT_METHODS.includes(method as DigitalPayment),
+  );
+}
+
+export function formatUser(u: typeof usersTable.$inferSelect) {
   return {
     id: u.id,
     name: u.name,
@@ -55,9 +69,7 @@ router.post("/register", async (req, res) => {
   }
 
   // Validate and sanitize accepted payment methods (drivers only)
-  const sanitizedPayments: string[] = role === "driver"
-    ? (acceptedPayments ?? []).filter((m): m is string => VALID_PAYMENT_METHODS.includes(m as DigitalPayment))
-    : [];
+  const sanitizedPayments = sanitizeAcceptedPayments(role, acceptedPayments);
 
   const normalizedPhone = normalizePhone(phone);
   if (!normalizedPhone) {
@@ -65,9 +77,9 @@ router.post("/register", async (req, res) => {
     return;
   }
 
-  // Basic password strength check
-  if (typeof password !== 'string' || password.length < 8) {
-    res.status(400).json({ error: 'Password must be at least 8 characters long' });
+  // Basic password strength check. Keep parity with the mobile app validation.
+  if (!isValidPassword(password)) {
+    res.status(400).json({ error: "Password must be at least 6 characters long" });
     return;
   }
 
@@ -128,26 +140,30 @@ router.post("/login", async (req, res) => {
     return;
   }
 
-  const [user] = await db.select().from(usersTable).where(eq(usersTable.phone, normalizedPhone)).limit(1);
-  if (!user) {
-    res.status(401).json({ error: "Invalid credentials" });
-    return;
-  }
+  try {
+    const [user] = await db.select().from(usersTable).where(eq(usersTable.phone, normalizedPhone)).limit(1);
+    if (!user) {
+      res.status(401).json({ error: "Invalid credentials" });
+      return;
+    }
 
-  const valid = await bcrypt.compare(password, user.passwordHash);
-  if (!valid) {
-    res.status(401).json({ error: "Invalid credentials" });
-    return;
-  }
+    const valid = await bcrypt.compare(password, user.passwordHash);
+    if (!valid) {
+      res.status(401).json({ error: "Invalid credentials" });
+      return;
+    }
 
-  if (!user.isActive) {
-    // Use 403 to indicate the account is explicitly blocked
-    res.status(403).json({ error: "Account is blocked" });
-    return;
-  }
+    if (!user.isActive) {
+      res.status(403).json({ error: "Account is blocked" });
+      return;
+    }
 
-  const token = signToken({ userId: user.id, role: user.role });
-  res.json({ token, user: formatUser(user) });
+    const token = signToken({ userId: user.id, role: user.role });
+    res.json({ token, user: formatUser(user) });
+  } catch (err) {
+    console.error("Login failed due to database/auth error", err);
+    res.status(503).json({ error: "Database unavailable. Please try again." });
+  }
 });
 
 // GET /api/auth/me
@@ -161,4 +177,3 @@ router.get("/me", authenticate, async (req, res) => {
 });
 
 export default router;
-export { formatUser };

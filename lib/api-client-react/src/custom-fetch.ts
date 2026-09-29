@@ -1,5 +1,6 @@
 export type CustomFetchOptions = RequestInit & {
   responseType?: "json" | "text" | "blob" | "auto";
+  timeout?: number;
 };
 
 export type ErrorType<T = unknown> = ApiError<T>;
@@ -10,6 +11,7 @@ export type AuthTokenGetter = () => Promise<string | null> | string | null;
 
 const NO_BODY_STATUS = new Set([204, 205, 304]);
 const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
+const DEFAULT_REQUEST_TIMEOUT_MS = 20000;
 
 // ---------------------------------------------------------------------------
 // Module-level configuration
@@ -327,7 +329,7 @@ export async function customFetch<T = unknown>(
   options: CustomFetchOptions = {},
 ): Promise<T> {
   input = applyBaseUrl(input);
-  const { responseType = "auto", headers: headersInit, ...init } = options;
+  const { responseType = "auto", timeout, headers: headersInit, ...init } = options;
 
   const method = resolveMethod(input, init.method);
 
@@ -364,13 +366,63 @@ export async function customFetch<T = unknown>(
   }
 
   const requestInfo = { method, url: resolveUrl(input) };
-
-  const response = await fetch(input, { ...init, method, headers });
-
-  if (!response.ok) {
-    const errorData = await parseErrorBody(response, method);
-    throw new ApiError(response, errorData, requestInfo);
+  const timeoutMs = typeof timeout === "number" ? timeout : DEFAULT_REQUEST_TIMEOUT_MS;
+  const timeoutController = typeof AbortController !== "undefined" ? new AbortController() : null;
+  let timedOut = false;
+  const timeoutId = timeoutController
+    ? setTimeout(() => {
+        timedOut = true;
+        timeoutController.abort();
+      }, timeoutMs)
+    : null;
+  let removeCallerAbortListener: (() => void) | null = null;
+  let requestSignal = init.signal ?? timeoutController?.signal;
+  if (timeoutController && init.signal) {
+    if (typeof AbortSignal !== "undefined" && "any" in AbortSignal) {
+      requestSignal = AbortSignal.any([init.signal, timeoutController.signal]);
+    } else {
+      const abortFromCaller = () => timeoutController.abort();
+      if (init.signal.aborted) {
+        timeoutController.abort();
+      } else {
+        init.signal.addEventListener("abort", abortFromCaller, { once: true });
+      }
+      removeCallerAbortListener = () => init.signal?.removeEventListener("abort", abortFromCaller);
+      requestSignal = timeoutController.signal;
+    }
   }
 
-  return (await parseSuccessBody(response, responseType, requestInfo)) as T;
+  try {
+    const response = await fetch(input, {
+      ...init,
+      method,
+      headers,
+      signal: requestSignal,
+    });
+
+    if (!response.ok) {
+      const errorData = await parseErrorBody(response, method);
+      throw new ApiError(response, errorData, requestInfo);
+    }
+
+    return (await parseSuccessBody(response, responseType, requestInfo)) as T;
+  } catch (error) {
+    if (
+      timedOut &&
+      error instanceof Error &&
+      error.name === "AbortError" &&
+      timeoutController
+    ) {
+      throw new Error(
+        `La petición tardó demasiado y se canceló después de ${timeoutMs} ms. Revisa tu conexión o intenta nuevamente.`,
+      );
+    }
+
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    removeCallerAbortListener?.();
+  }
 }

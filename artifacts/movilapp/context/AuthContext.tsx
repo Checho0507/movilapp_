@@ -43,10 +43,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           AsyncStorage.getItem('auth_token'),
           AsyncStorage.getItem('auth_user'),
         ]);
-        if (t && u) {
-          setToken(t);
-          setUser(JSON.parse(u));
+
+        if (!t) {
+          await AsyncStorage.multiRemove(['auth_token', 'auth_user']);
+          return;
         }
+
+        if (!u) {
+          await AsyncStorage.multiRemove(['auth_token', 'auth_user']);
+          return;
+        }
+
+        try {
+          const parsedUser = JSON.parse(u) as AuthUser;
+          if (parsedUser && typeof parsedUser === 'object' && parsedUser.id && parsedUser.phone) {
+            setToken(t);
+            setUser(parsedUser);
+            return;
+          }
+        } catch {
+          // Ignore malformed cached user data and force a clean logout state.
+        }
+
+        await AsyncStorage.multiRemove(['auth_token', 'auth_user']);
       } finally {
         setIsLoading(false);
       }

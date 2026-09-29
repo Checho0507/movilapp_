@@ -677,7 +677,7 @@ components:
     # ─── TRIP ─────────────────────────────────────────────────────────────────
     Trip:
       type: object
-      required: [id, passengerId, status, originLat, originLng, originAddress, vehicleType, estimatedPrice, paymentMethod, createdAt]
+      required: [id, passengerId, status, originLat, originLng, originAddress, vehicleType, paymentMethod, createdAt]
       properties:
         id:
           type: integer
@@ -695,15 +695,23 @@ components:
         originAddress:
           type: string
         destinationLat:
-          type: number
+          type: ["number", "null"]
         destinationLng:
-          type: number
+          type: ["number", "null"]
         destinationAddress:
-          type: string
+          type: ["string", "null"]
+        destinationPending:
+          type: boolean
         vehicleType:
           type: string
         estimatedPrice:
-          type: number
+          type: ["number", "null"]
+        minimumFare:
+          type: ["number", "null"]
+        passengerOffer:
+          type: ["number", "null"]
+        driverCounteroffer:
+          type: ["number", "null"]
         finalPrice:
           type: ["number", "null"]
         distanceKm:
@@ -759,11 +767,11 @@ components:
         originAddress:
           type: string
         destinationLat:
-          type: number
+          type: ["number", "null"]
         destinationLng:
-          type: number
+          type: ["number", "null"]
         destinationAddress:
-          type: string
+          type: ["string", "null"]
         vehicleType:
           type: string
           enum: [economico, ejecutivo, taxi, moto]
@@ -771,6 +779,8 @@ components:
           type: string
           enum: [cash, card]
         estimatedPrice:
+          type: number
+        passengerOffer:
           type: number
 
     TripStatusUpdate:

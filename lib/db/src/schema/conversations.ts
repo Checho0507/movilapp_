@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -21,6 +21,7 @@ export const conversationMessagesTable = pgTable("conversation_messages", {
   conversationId: integer("conversation_id").notNull(),
   senderId: integer("sender_id").notNull(),
   content: text("content").notNull(),
+  attachments: jsonb("attachments").$type<Array<{ name: string; mimeType: string; size: number; url: string }>>().notNull().default([]),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
