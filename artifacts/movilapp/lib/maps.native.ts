@@ -1,5 +1,6 @@
 import React, { forwardRef, useImperativeHandle, useMemo } from 'react';
 import { Image, View, type LayoutChangeEvent, StyleSheet } from 'react-native';
+import Svg, { Path } from 'react-native-svg';
 import { getMapTileUrl } from './api-config';
 
 export type Region = {
@@ -58,6 +59,7 @@ export const MapView = forwardRef<any, MapViewProps>(function MapView(
   { style, region, initialRegion, children, onRegionChangeComplete },
   ref,
 ) {
+  const [mapSize, setMapSize] = React.useState({ width: 0, height: 0 });
   const mapRegion = region ?? initialRegion ?? {
     latitude: 4.711,
     longitude: -74.0721,
@@ -65,10 +67,24 @@ export const MapView = forwardRef<any, MapViewProps>(function MapView(
     longitudeDelta: 0.06,
   };
   const tiles = useMemo(() => tileGrid(mapRegion), [mapRegion]);
-  const markerElements = React.Children.toArray(children).filter((child) => {
-    if (!React.isValidElement(child)) return false;
-    return Boolean((child.props as { coordinate?: unknown }).coordinate);
-  });
+  const mapElements: React.ReactElement[] = [];
+  const collectElements = (elements: React.ReactNode) => {
+    React.Children.forEach(elements, (child) => {
+      if (!React.isValidElement(child)) return;
+      if (child.type === React.Fragment) {
+        collectElements((child as React.ReactElement<{ children?: React.ReactNode }>).props.children);
+      } else {
+        mapElements.push(child);
+      }
+    });
+  };
+  collectElements(children);
+  const markerElements = mapElements.filter((element) =>
+    Boolean((element.props as { coordinate?: unknown }).coordinate),
+  );
+  const polylineElements = mapElements.filter((element) =>
+    Array.isArray((element.props as { coordinates?: unknown }).coordinates),
+  );
 
   useImperativeHandle(ref, () => ({
     animateToRegion: () => undefined,
@@ -76,7 +92,11 @@ export const MapView = forwardRef<any, MapViewProps>(function MapView(
     animateToCoordinate: () => undefined,
   }));
 
-  const handleLayout = (_event: LayoutChangeEvent) => {
+  const handleLayout = (event: LayoutChangeEvent) => {
+    const { width, height } = event.nativeEvent.layout;
+    setMapSize((current) =>
+      current.width === width && current.height === height ? current : { width, height },
+    );
     onRegionChangeComplete?.(mapRegion);
   };
 
@@ -97,6 +117,56 @@ export const MapView = forwardRef<any, MapViewProps>(function MapView(
         },
       }),
     ),
+    mapSize.width > 0 && mapSize.height > 0 && polylineElements.length > 0
+      ? React.createElement(
+          Svg,
+          {
+            width: mapSize.width,
+            height: mapSize.height,
+            viewBox: `0 0 ${mapSize.width} ${mapSize.height}`,
+            style: styles.routes,
+          },
+          polylineElements.map((element, index) => {
+            const props = element.props as {
+              coordinates: { latitude: number; longitude: number }[];
+              strokeColor?: string;
+              strokeWidth?: number;
+              lineDashPattern?: number[];
+            };
+            const points = props.coordinates.filter(
+              (coordinate) =>
+                Number.isFinite(coordinate.latitude) &&
+                Number.isFinite(coordinate.longitude),
+            );
+            if (points.length < 2) return null;
+            const path = points
+              .map((coordinate, pointIndex) => {
+                const x =
+                  ((coordinate.longitude - mapRegion.longitude) /
+                    mapRegion.longitudeDelta +
+                    0.5) *
+                  mapSize.width;
+                const y =
+                  (0.5 -
+                    (coordinate.latitude - mapRegion.latitude) /
+                      mapRegion.latitudeDelta) *
+                  mapSize.height;
+                return `${pointIndex === 0 ? 'M' : 'L'}${x},${y}`;
+              })
+              .join(' ');
+            return React.createElement(Path, {
+              key: `route-${index}`,
+              d: path,
+              fill: 'none',
+              stroke: props.strokeColor ?? '#FFB800',
+              strokeWidth: props.strokeWidth ?? 4,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+              strokeDasharray: props.lineDashPattern?.join(' '),
+            });
+          }),
+        )
+      : null,
     markerElements.map((child, index) => {
       const props = (child as React.ReactElement<{ coordinate: { latitude: number; longitude: number }; title?: string }>).props;
       const left = 50 + ((props.coordinate.longitude - mapRegion.longitude) / mapRegion.longitudeDelta) * 100;
@@ -122,5 +192,6 @@ export const Polyline: React.FC<any> = () => null;
 
 const styles = StyleSheet.create({
   container: { overflow: 'hidden' },
+  routes: { position: 'absolute', left: 0, top: 0 },
   marker: { position: 'absolute', transform: [{ translateX: -10 }, { translateY: -10 }] },
 });

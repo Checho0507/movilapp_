@@ -21,6 +21,7 @@ import { useSocket } from '@/context/SocketContext';
 import colors from '@/constants/colors';
 
 import { getApiUrl, getMapTileUrl } from '@/lib/api-config';
+import { fetchDrivingRoute } from '@/lib/routing';
 
 const BASE_URL = getApiUrl();
 const MAP_TILE_URL = getMapTileUrl();
@@ -176,26 +177,6 @@ function generateVerifyCodes(correct: string): string[] {
   return [...codes].sort(() => Math.random() - 0.5);
 }
 
-// Fetch driving route from OSRM (free, no API key needed)
-async function fetchOSRMRoute(
-  oLat: number, oLng: number, dLat: number, dLng: number,
-): Promise<{ latitude: number; longitude: number }[]> {
-  try {
-    const url = `https://router.project-osrm.org/route/v1/driving/${oLng},${oLat};${dLng},${dLat}?overview=full&geometries=geojson`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'MovilApp/1.0' } });
-    const json = await res.json();
-    if (json.routes?.[0]) {
-      return (json.routes[0].geometry.coordinates as [number, number][]).map(
-        ([lng, lat]) => ({ latitude: lat, longitude: lng }),
-      );
-    }
-  } catch { /* fallback to straight line */ }
-  return [
-    { latitude: oLat, longitude: oLng },
-    { latitude: dLat, longitude: dLng },
-  ];
-}
-
 export default function TripScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const tripId = parseInt(id ?? '0');
@@ -208,7 +189,18 @@ export default function TripScreen() {
   const flatRef = useRef<FlatList>(null);
 
   // Server data — hooks take id:number directly (not an object)
-  const { data: tripData } = useGetTrip(tripId);
+  const {
+    data: tripData,
+    isError: tripLoadFailed,
+    isLoading: isTripLoading,
+    isFetching: isTripRefreshing,
+    refetch: refetchTrip,
+  } = useGetTrip(tripId, {
+    query: {
+      queryKey: [`/api/trips/${tripId}`],
+      enabled: Number.isSafeInteger(tripId) && tripId > 0,
+    },
+  });
   const updateStatus = useUpdateTripStatus();
   const sendMsg = useCreateMessage();
   const pushLocation = useUpdateDriverLocation();
@@ -300,32 +292,53 @@ export default function TripScreen() {
     return () => clearInterval(iv);
   }, [trip?.status, trip?.driverAcceptedAt]);
 
-  // Fetch OSRM route whenever trip loads or status changes
+  // Passengers get the complete driving route; drivers navigate with Waze.
   useEffect(() => {
     if (!trip) return;
-    const hasDestination = trip.destinationLat != null && trip.destinationLng != null;
-    if (trip.status === 'in_progress' && hasDestination) {
-      // Trip active: full route origin → destination
-      fetchOSRMRoute(
-        Number(trip.originLat), Number(trip.originLng),
-        Number(trip.destinationLat), Number(trip.destinationLng),
-      ).then(setRouteCoords);
-    } else if (isDriver && (trip.status === 'accepted' || trip.status === 'driver_arriving')) {
-      // Driver heading to pickup: route from driver position → origin
-      const dLat = trip.driver?.currentLat != null ? Number(trip.driver.currentLat) : null;
-      const dLng = trip.driver?.currentLng != null ? Number(trip.driver.currentLng) : null;
-      if (dLat !== null && dLng !== null) {
-        fetchOSRMRoute(dLat, dLng, Number(trip.originLat), Number(trip.originLng))
-          .then(setRouteCoords);
-      } else {
-        // No driver coords yet — draw straight dashed line to origin
-        setRouteCoords([]);
-      }
-    } else {
+    const origin = { lat: Number(trip.originLat), lng: Number(trip.originLng) };
+    const destination = {
+      lat: Number(trip.destinationLat),
+      lng: Number(trip.destinationLng),
+    };
+    if (
+      isDriver ||
+      trip.destinationLat == null ||
+      trip.destinationLng == null ||
+      !Number.isFinite(origin.lat) ||
+      !Number.isFinite(origin.lng) ||
+      !Number.isFinite(destination.lat) ||
+      !Number.isFinite(destination.lng) ||
+      (origin.lat === destination.lat && origin.lng === destination.lng)
+    ) {
       setRouteCoords([]);
+      return;
     }
-  // trip?.id ensures this re-runs when trip first arrives, not only on status changes
-  }, [trip?.id, trip?.status, trip?.driver?.currentLat, trip?.driver?.currentLng]);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    setRouteCoords([]);
+    fetchDrivingRoute(origin, destination, controller.signal)
+      .then(setRouteCoords)
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          console.warn('Could not load trip route:', error);
+          setRouteCoords([]);
+        }
+      })
+      .finally(() => clearTimeout(timeout));
+
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [
+    isDriver,
+    trip?.id,
+    trip?.originLat,
+    trip?.originLng,
+    trip?.destinationLat,
+    trip?.destinationLng,
+  ]);
 
   // Show rating when trip completes (passenger)
   useEffect(() => {
@@ -463,11 +476,52 @@ export default function TripScreen() {
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
-  if (!trip) {
+  if (!trip && tripLoadFailed) {
+    return (
+      <View style={styles.loading}>
+        <Feather name="alert-circle" size={36} color={colors.light.destructive} />
+        <Text style={styles.loadErrorTitle}>No se pudo cargar el viaje</Text>
+        <Text style={styles.loadErrorText}>
+          Comprueba tu conexión o vuelve al inicio e inténtalo de nuevo.
+        </Text>
+        <TouchableOpacity
+          style={styles.loadRetryButton}
+          disabled={isTripRefreshing}
+          onPress={() => { void refetchTrip(); }}
+        >
+          {isTripRefreshing
+            ? <ActivityIndicator color={colors.light.primaryForeground} />
+            : <Text style={styles.loadRetryText}>Reintentar</Text>}
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.loadHomeButton}
+          onPress={() => router.replace('/(tabs)')}
+        >
+          <Text style={styles.loadHomeText}>Volver al inicio</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  if (!trip && isTripLoading) {
     return (
       <View style={styles.loading}>
         <ActivityIndicator size="large" color={colors.light.primary} />
         <Text style={styles.loadingText}>Cargando viaje...</Text>
+      </View>
+    );
+  }
+
+  if (!trip) {
+    return (
+      <View style={styles.loading}>
+        <Text style={styles.loadErrorTitle}>No encontramos este viaje</Text>
+        <TouchableOpacity
+          style={styles.loadHomeButton}
+          onPress={() => router.replace('/(tabs)')}
+        >
+          <Text style={styles.loadHomeText}>Volver al inicio</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -478,15 +532,7 @@ export default function TripScreen() {
   const sameOriginDest = (trip.originLat != null && trip.destinationLat != null) &&
     (Number(trip.originLat) === Number(trip.destinationLat) && Number(trip.originLng) === Number(trip.destinationLng));
   const hasDestination = trip.destinationLat != null && trip.destinationLng != null && !sameOriginDest;
-  const focusDriver = !isDriver && ['accepted', 'driver_arriving'].includes(trip.status) && driverLat != null && driverLng != null;
-  const mapRegion = focusDriver
-    ? {
-      latitude: driverLat,
-      longitude: driverLng,
-      latitudeDelta: 0.02,
-      longitudeDelta: 0.02,
-    }
-    : hasDestination
+  const mapRegion = hasDestination
       ? {
         latitude: (trip.originLat + trip.destinationLat) / 2,
         longitude: (trip.originLng + trip.destinationLng) / 2,
@@ -499,11 +545,6 @@ export default function TripScreen() {
         latitudeDelta: 0.02,
         longitudeDelta: 0.02,
       };
-
-  useEffect(() => {
-    if (!focusDriver || !mapRef.current) return;
-    mapRef.current.animateToRegion(mapRegion, 500);
-  }, [focusDriver, mapRegion.latitude, mapRegion.longitude]);
 
   const isDone = trip.status === 'completed' || trip.status === 'cancelled';
 
@@ -536,17 +577,13 @@ export default function TripScreen() {
           tileSize={256}
           zIndex={1}
         />
-        {!focusDriver && (
-          <>
-            <Marker coordinate={{ latitude: trip.originLat, longitude: trip.originLng }} title="Origen">
-              <View style={[styles.markerPin, { backgroundColor: colors.light.primary }]} />
-            </Marker>
-            { (trip.destinationLat != null && trip.destinationLng != null && !(Number(trip.destinationLat) === Number(trip.originLat) && Number(trip.destinationLng) === Number(trip.originLng))) && (
-              <Marker coordinate={{ latitude: trip.destinationLat, longitude: trip.destinationLng }} title="Destino">
-                <View style={[styles.markerPin, { backgroundColor: colors.light.destructive }]} />
-              </Marker>
-            ) }
-          </>
+        <Marker coordinate={{ latitude: trip.originLat, longitude: trip.originLng }} title="Origen">
+          <View style={[styles.markerPin, { backgroundColor: colors.light.primary }]} />
+        </Marker>
+        {hasDestination && (
+          <Marker coordinate={{ latitude: trip.destinationLat, longitude: trip.destinationLng }} title="Destino">
+            <View style={[styles.markerPin, { backgroundColor: colors.light.destructive }]} />
+          </Marker>
         )}
         {trip.driver && (
           <Marker coordinate={{ latitude: driverLat, longitude: driverLng }} title={trip.driver.name}>
@@ -556,10 +593,10 @@ export default function TripScreen() {
           </Marker>
         )}
         {/* Route when in progress */}
-        {!focusDriver && routeCoords.length > 1 && (
+        {routeCoords.length > 1 && (
           <Polyline coordinates={routeCoords} strokeColor={colors.light.primary} strokeWidth={4} />
         )}
-        {!focusDriver && routeCoords.length === 0 && hasDestination && (
+        {routeCoords.length < 2 && hasDestination && (
           <Polyline
             coordinates={[
               { latitude: trip.originLat, longitude: trip.originLng },
@@ -679,19 +716,17 @@ export default function TripScreen() {
                 {!trip.finalPrice && <Text style={styles.priceEstLabel}> estimado</Text>}
                 <Text style={styles.payMethod}>· {PAYMENT_LABELS[trip.paymentMethod] ?? trip.paymentMethod}</Text>
               </View>
-              {!focusDriver && (
-                <View style={styles.routeBlock}>
-                  <View style={styles.routeRow}><Feather name="circle" size={9} color={colors.light.primary} /><Text style={styles.routeText} numberOfLines={1}>{trip.originAddress}</Text></View>
-                  {(trip.destinationPending || sameOriginDest || (trip.destinationAddress && !(trip.destinationAddress === trip.originAddress))) && (
-                    <View style={styles.routeRow}>
-                      <Feather name="map-pin" size={9} color={colors.light.destructive} />
-                      <Text style={styles.routeText} numberOfLines={1}>
-                        {sameOriginDest || trip.destinationPending ? 'Destino sin especificar' : trip.destinationAddress}
-                      </Text>
-                    </View>
-                  )}
+              <View style={styles.routeBlock}>
+                <View style={styles.routeRow}><Feather name="circle" size={9} color={colors.light.primary} /><Text style={styles.routeText} numberOfLines={1}>{trip.originAddress}</Text></View>
+                {(trip.destinationPending || sameOriginDest || (trip.destinationAddress && !(trip.destinationAddress === trip.originAddress))) && (
+                  <View style={styles.routeRow}>
+                    <Feather name="map-pin" size={9} color={colors.light.destructive} />
+                    <Text style={styles.routeText} numberOfLines={1}>
+                      {sameOriginDest || trip.destinationPending ? 'Destino sin especificar' : trip.destinationAddress}
+                    </Text>
+                  </View>
+                )}
                 </View>
-              )}
 
               {/* Passenger code (for passenger, shown while driver hasn't started trip) */}
               {!isDriver && ['accepted', 'driver_arriving'].includes(trip.status) && (
@@ -936,6 +971,15 @@ const styles = StyleSheet.create({
   },
   loading: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.light.background, gap: 12 },
   loadingText: { color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular' },
+  loadErrorTitle: { color: colors.light.foreground, fontSize: 18, fontFamily: 'Inter_700Bold', textAlign: 'center' },
+  loadErrorText: { color: colors.light.mutedForeground, fontFamily: 'Inter_400Regular', textAlign: 'center', maxWidth: 300 },
+  loadRetryButton: {
+    minWidth: 160, minHeight: 48, borderRadius: 14, paddingHorizontal: 20,
+    backgroundColor: colors.light.primary, alignItems: 'center', justifyContent: 'center',
+  },
+  loadRetryText: { color: colors.light.primaryForeground, fontFamily: 'Inter_700Bold' },
+  loadHomeButton: { minHeight: 44, paddingHorizontal: 16, alignItems: 'center', justifyContent: 'center' },
+  loadHomeText: { color: colors.light.mutedForeground, fontFamily: 'Inter_600SemiBold' },
   markerPin: { width: 14, height: 14, borderRadius: 7, borderWidth: 2, borderColor: '#fff' },
   taxiMarker: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
   // Header

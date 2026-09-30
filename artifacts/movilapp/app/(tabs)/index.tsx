@@ -4,7 +4,7 @@ import {
   Platform, Alert, Animated, Vibration, Image, TextInput, ScrollView, Keyboard,
   KeyboardAvoidingView,
 } from 'react-native';
-import { MapView, Marker, UrlTile } from '@/lib/maps';
+import { MapView, Marker, Polyline, UrlTile } from '@/lib/maps';
 import type { Region } from '@/lib/maps';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -18,6 +18,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useSocket } from '@/context/SocketContext';
 import colors from '@/constants/colors';
 import { getApiUrl, getMapTileUrl } from '@/lib/api-config';
+import { fetchDrivingRoute, type RoutePoint } from '@/lib/routing';
 import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 
 const BOGOTA: Region = { latitude: 4.711, longitude: -74.0721, latitudeDelta: 0.06, longitudeDelta: 0.06 };
@@ -494,7 +495,9 @@ function PassengerHome() {
   // Address search state
   const [userLoc, setUserLoc] = useState<{ lat: number; lng: number } | null>(null);
   const [userCity, setUserCity] = useState<string | null>(null);
+  const [locationUnavailable, setLocationUnavailable] = useState(false);
   const [nearbyTaxis, setNearbyTaxis] = useState<Array<{ id: string; lat: number; lng: number; angle: number }>>([]);
+  const [routeCoords, setRouteCoords] = useState<RoutePoint[]>([]);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -520,21 +523,49 @@ function PassengerHome() {
 
   // Get initial location
   useEffect(() => {
+    let active = true;
     (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      const r: Region = {
-        latitude: pos.coords.latitude, longitude: pos.coords.longitude,
-        latitudeDelta: 0.01, longitudeDelta: 0.01,
+      let latitude: number;
+      let longitude: number;
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          if (active) setLocationUnavailable(true);
+          return;
+        }
+        const position = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        latitude = position.coords.latitude;
+        longitude = position.coords.longitude;
+      } catch (error) {
+        console.warn('Passenger location is unavailable:', error);
+        if (active) setLocationUnavailable(true);
+        return;
+      }
+
+      if (!active) return;
+      const initialRegion: Region = {
+        latitude,
+        longitude,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
       };
-      setUserLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-      setRegion(r);
-      mapRef.current?.animateToRegion(r, 600);
-      // Detect the user's city for automatic address scoping
-      const { city } = await reverseGeocodeFull(pos.coords.latitude, pos.coords.longitude);
-      if (city) setUserCity(city);
+      setLocationUnavailable(false);
+      setUserLoc({ lat: latitude, lng: longitude });
+      setRegion(initialRegion);
+      mapRef.current?.animateToRegion(initialRegion, 600);
+
+      try {
+        const { city } = await reverseGeocodeFull(latitude, longitude);
+        if (active && city) setUserCity(city);
+      } catch (error) {
+        console.warn('Could not detect passenger city from location:', error);
+      }
     })();
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -585,6 +616,36 @@ function PassengerHome() {
   const handleRegionChange = useCallback((r: Region) => {
     setRegion(r);
   }, []);
+
+  useEffect(() => {
+    if (
+      step !== 'confirm' ||
+      !origin ||
+      !dest ||
+      (origin.lat === dest.lat && origin.lng === dest.lng)
+    ) {
+      setRouteCoords([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    setRouteCoords([]);
+    fetchDrivingRoute(origin, dest, controller.signal)
+      .then(setRouteCoords)
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          console.warn('Could not load route preview:', error);
+          setRouteCoords([]);
+        }
+      })
+      .finally(() => clearTimeout(timeout));
+
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [step, origin, dest]);
 
   // Estimate price when origin + dest are known
   useEffect(() => {
@@ -649,6 +710,16 @@ function PassengerHome() {
 
   const confirmDest = () => {
     if (!pending) return;
+    if (origin) {
+      const fittedRegion: Region = {
+        latitude: (origin.lat + pending.lat) / 2,
+        longitude: (origin.lng + pending.lng) / 2,
+        latitudeDelta: Math.max(Math.abs(origin.lat - pending.lat) * 1.8, 0.015),
+        longitudeDelta: Math.max(Math.abs(origin.lng - pending.lng) * 1.8, 0.015),
+      };
+      setRegion(fittedRegion);
+      mapRef.current?.animateToRegion(fittedRegion, 500);
+    }
     setDest(pending);
     setPending(null);
     setQuery('');
@@ -814,6 +885,25 @@ function PassengerHome() {
           tileSize={256}
           zIndex={1}
         />
+        {step === 'confirm' && origin && dest && routeCoords.length > 1 && (
+          <Polyline
+            coordinates={routeCoords}
+            strokeColor={colors.light.primary}
+            strokeWidth={4}
+          />
+        )}
+        {step === 'confirm' && origin && dest && routeCoords.length < 2 &&
+          (origin.lat !== dest.lat || origin.lng !== dest.lng) && (
+            <Polyline
+              coordinates={[
+                { latitude: origin.lat, longitude: origin.lng },
+                { latitude: dest.lat, longitude: dest.lng },
+              ]}
+              strokeColor={colors.light.mutedForeground}
+              strokeWidth={2}
+              lineDashPattern={[8, 5]}
+            />
+          )}
         {nearbyTaxis.length > 0 && (
           nearbyTaxis.map((taxi) => (
             <Marker key={taxi.id} coordinate={{ latitude: taxi.lat, longitude: taxi.lng }} title="Taxi cercano">
@@ -891,6 +981,14 @@ function PassengerHome() {
       {step === 'idle' && (
         <View style={[styles.sheet, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 100) }]}>
           <Text style={styles.sheetTitle}>Hola, {user?.name?.split(' ')[0]}</Text>
+          {locationUnavailable && (
+            <View style={styles.locationNotice}>
+              <Feather name="map-pin" size={15} color={colors.light.primary} />
+              <Text style={styles.locationNoticeText}>
+                No pudimos obtener tu ubicación. Busca manualmente el punto de partida para continuar.
+              </Text>
+            </View>
+          )}
 
           <View style={styles.summaryCard}>
             <View style={styles.summaryHeader}>
@@ -1723,6 +1821,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20, paddingTop: 18, gap: 12,
   },
   sheetTitle: { fontSize: 18, fontWeight: '700', color: colors.light.foreground, fontFamily: 'Inter_700Bold', marginBottom: 4 },
+  locationNotice: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: colors.light.primary + '12', borderWidth: 1,
+    borderColor: colors.light.primary + '45', borderRadius: 10,
+    padding: 10, marginBottom: 10,
+  },
+  locationNoticeText: { flex: 1, fontSize: 12, color: colors.light.foreground, fontFamily: 'Inter_400Regular', lineHeight: 17 },
   summaryCard: {
     backgroundColor: colors.light.secondary, borderRadius: colors.radius, borderWidth: 1, borderColor: colors.light.border,
     padding: 14, gap: 12,

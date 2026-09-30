@@ -115,7 +115,10 @@ router.post("/register", async (req, res) => {
     res.status(201).json({ token, user: formatUser(user) });
   } catch (err) {
     // Handle unique constraint race (Postgres 23505) or other DB errors
-    const pgErrCode = (err && (err.code || err.errno)) as unknown as string;
+    const pgErrCode =
+      err && typeof err === "object"
+        ? ("code" in err ? err.code : "errno" in err ? err.errno : undefined)
+        : undefined;
     if (pgErrCode === "23505" || /duplicate/i.test(String(err))) {
       res.status(409).json({ error: "Phone number already registered" });
       return;

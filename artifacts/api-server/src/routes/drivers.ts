@@ -37,17 +37,9 @@ function isPendingWompiSubscription(sub?: { notes?: string | null } | null) {
   return Boolean(sub?.notes && /wompi_status\s*:\s*pending/i.test(sub.notes));
 }
 
-function getLatestNonPendingSubscription(
-  subscriptions: Array<{
-    id: number;
-    plan: string;
-    priceCop: number;
-    startsAt: Date;
-    expiresAt: Date;
-    isTrial: boolean;
-    notes?: string | null;
-  }>,
-) {
+function getLatestNonPendingSubscription<T extends { expiresAt: Date; notes?: string | null }>(
+  subscriptions: T[],
+): T | null {
   return [...subscriptions]
     .filter(sub => !isPendingWompiSubscription(sub))
     .sort((a, b) => b.expiresAt.getTime() - a.expiresAt.getTime())[0] ?? null;
@@ -55,7 +47,15 @@ function getLatestNonPendingSubscription(
 
 async function ensureDriverHasStarterSubscription(driverId: number) {
   const [existing] = await db
-    .select({ id: subscriptionsTable.id, expiresAt: subscriptionsTable.expiresAt })
+    .select({
+      id: subscriptionsTable.id,
+      plan: subscriptionsTable.plan,
+      priceCop: subscriptionsTable.priceCop,
+      startsAt: subscriptionsTable.startsAt,
+      expiresAt: subscriptionsTable.expiresAt,
+      isTrial: subscriptionsTable.isTrial,
+      notes: subscriptionsTable.notes,
+    })
     .from(subscriptionsTable)
     .where(eq(subscriptionsTable.driverId, driverId))
     .orderBy(subscriptionsTable.expiresAt)
