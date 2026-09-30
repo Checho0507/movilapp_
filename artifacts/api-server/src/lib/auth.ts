@@ -1,13 +1,16 @@
 import jwt from "jsonwebtoken";
 import type { Request, Response, NextFunction } from "express";
 
-const JWT_SECRET = process.env["SESSION_SECRET"] ?? (process.env.NODE_ENV === 'production' ? undefined : "movilapp-dev-secret");
-
-if (!JWT_SECRET) {
-  // In production we must have a secret configured. In development we allow a dev secret but log a warning
-  throw new Error("SESSION_SECRET is required in production. Set the SESSION_SECRET environment variable.");
+function getJwtSecret(): string {
+  const secret = process.env["SESSION_SECRET"] ??
+    (process.env.NODE_ENV === "production" ? undefined : "movilapp-dev-secret");
+  if (!secret) {
+    throw new Error("SESSION_SECRET is required in production. Set the SESSION_SECRET environment variable.");
+  }
+  return secret;
 }
 
+const JWT_SECRET = getJwtSecret();
 
 export interface JwtPayload {
   userId: number;
