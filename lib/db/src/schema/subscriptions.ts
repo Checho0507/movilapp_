@@ -4,8 +4,10 @@ import {
   integer,
   text,
   boolean,
+  check,
   timestamp,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { usersTable } from "./users";
 
 // Plan definitions — single source of truth for prices and durations
@@ -25,7 +27,10 @@ export const subscriptionPlansTable = pgTable("subscription_plans", {
   days: integer("days").notNull(),
   priceCop: integer("price_cop").notNull().default(0),
   isActive: boolean("is_active").notNull().default(true),
-});
+}, (table) => [
+  check("subscription_plans_days_check", sql`${table.days} > 0`),
+  check("subscription_plans_price_cop_check", sql`${table.priceCop} >= 0`),
+]);
 
 export const subscriptionsTable = pgTable("subscriptions", {
   id: serial("id").primaryKey(),
